@@ -17,10 +17,11 @@ pub enum PoemCreateAction {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum PoemFocus { Poem, Author, Tags }
+enum PoemFocus { Poem, Title, Author, Tags }
 
 pub struct PoemCreateScreen {
     poem_area: TextArea<'static>,
+    title_area: TextArea<'static>,
     author_area: TextArea<'static>,
     tags_area: TextArea<'static>,
     focus: PoemFocus,
@@ -32,31 +33,24 @@ pub struct PoemCreateScreen {
 impl PoemCreateScreen {
     pub fn new(deck_id: i64, notetype_id: i64) -> Self {
         let mut poem_area = TextArea::default();
-        poem_area.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Poem text "),
-        );
+        poem_area.set_block(Block::default().borders(Borders::ALL).title(" Poem text "));
         poem_area.set_placeholder_text("Shall I compare thee to a summer's day?");
 
+        let mut title_area = TextArea::default();
+        title_area.set_block(Block::default().borders(Borders::ALL).title(" Title "));
+        title_area.set_placeholder_text("Sonnet 18");
+
         let mut author_area = TextArea::default();
-        author_area.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Author "),
-        );
+        author_area.set_block(Block::default().borders(Borders::ALL).title(" Author "));
         author_area.set_placeholder_text("Shakespeare");
 
         let mut tags_area = TextArea::default();
-        tags_area.set_block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Tags (space-separated) "),
-        );
+        tags_area.set_block(Block::default().borders(Borders::ALL).title(" Tags (space-separated) "));
         tags_area.set_placeholder_text("sonnets poem");
 
         Self {
             poem_area,
+            title_area,
             author_area,
             tags_area,
             focus: PoemFocus::Poem,
@@ -71,7 +65,8 @@ impl PoemCreateScreen {
             KeyCode::Esc => return PoemCreateAction::Cancel,
             KeyCode::Tab => {
                 self.focus = match self.focus {
-                    PoemFocus::Poem => PoemFocus::Author,
+                    PoemFocus::Poem => PoemFocus::Title,
+                    PoemFocus::Title => PoemFocus::Author,
                     PoemFocus::Author => PoemFocus::Tags,
                     PoemFocus::Tags => PoemFocus::Poem,
                 };
@@ -81,14 +76,15 @@ impl PoemCreateScreen {
                 self.focus = match self.focus {
                     PoemFocus::Poem => PoemFocus::Tags,
                     PoemFocus::Tags => PoemFocus::Author,
-                    PoemFocus::Author => PoemFocus::Poem,
+                    PoemFocus::Author => PoemFocus::Title,
+                    PoemFocus::Title => PoemFocus::Poem,
                 };
                 return PoemCreateAction::None;
             }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.build_cards();
             }
-            KeyCode::Enter if self.focus == PoemFocus::Tags || self.focus == PoemFocus::Author => {
+            KeyCode::Enter if self.focus != PoemFocus::Poem => {
                 return self.build_cards();
             }
             KeyCode::Char('g') if self.focus == PoemFocus::Poem => {
@@ -99,6 +95,7 @@ impl PoemCreateScreen {
         }
         match self.focus {
             PoemFocus::Poem => { self.poem_area.input(key); }
+            PoemFocus::Title => { self.title_area.input(key); }
             PoemFocus::Author => { self.author_area.input(key); }
             PoemFocus::Tags => { self.tags_area.input(key); }
         }
@@ -108,6 +105,7 @@ impl PoemCreateScreen {
     pub fn handle_paste(&mut self, text: String) {
         let area = match self.focus {
             PoemFocus::Poem => &mut self.poem_area,
+            PoemFocus::Title => &mut self.title_area,
             PoemFocus::Author => &mut self.author_area,
             PoemFocus::Tags => &mut self.tags_area,
         };
@@ -122,6 +120,7 @@ impl PoemCreateScreen {
             return PoemCreateAction::Cancel;
         }
 
+        let title = self.title_area.lines().join("").trim().to_string();
         let author = self.author_area.lines().join("").trim().to_string();
         let tag_text = self.tags_area.lines().join(" ");
         let mut tags: Vec<String> = tag_text
@@ -129,9 +128,10 @@ impl PoemCreateScreen {
             .map(|s| s.to_string())
             .collect();
         if !author.is_empty() {
-            // Prepend author as a tag (slugified: spaces → underscores)
-            let author_tag = author.replace(' ', "_");
-            tags.insert(0, format!("author:{author_tag}"));
+            tags.insert(0, format!("author:{}", author.replace(' ', "_")));
+        }
+        if !title.is_empty() {
+            tags.insert(0, format!("title:{}", title.replace(' ', "_")));
         }
 
         let cards: Vec<NewCard> = poem_to_lpcg(&raw, self.mode)
@@ -155,15 +155,16 @@ impl PoemCreateScreen {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2),  // hint bar
-                Constraint::Min(6),     // poem textarea
+                Constraint::Min(5),     // poem textarea
                 Constraint::Length(1),  // live preview
+                Constraint::Length(3),  // title
                 Constraint::Length(3),  // author
                 Constraint::Length(3),  // tags
                 Constraint::Length(2),  // footer
             ])
             .split(area);
 
-        let hint = Paragraph::new("Poem → Anki · Ctrl+Enter save · Tab cycle fields · g mode · Esc cancel")
+        let hint = Paragraph::new("Poem → Anki · Ctrl+Enter save · Tab/S-Tab cycle fields · g mode · Esc cancel")
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(hint, chunks[0]);
 
@@ -173,6 +174,10 @@ impl PoemCreateScreen {
         self.poem_area.set_block(
             Block::default().borders(Borders::ALL).title(" Poem text ")
                 .border_style(if self.focus == PoemFocus::Poem { focused_style } else { unfocused_style }),
+        );
+        self.title_area.set_block(
+            Block::default().borders(Borders::ALL).title(" Title ")
+                .border_style(if self.focus == PoemFocus::Title { focused_style } else { unfocused_style }),
         );
         self.author_area.set_block(
             Block::default().borders(Borders::ALL).title(" Author ")
@@ -185,7 +190,6 @@ impl PoemCreateScreen {
 
         frame.render_widget(&self.poem_area, chunks[1]);
 
-        // Live preview
         let raw = self.poem_area.lines().join("\n");
         let count = count_cards(raw.trim(), self.mode);
         let preview_style = if count > 0 {
@@ -193,27 +197,27 @@ impl PoemCreateScreen {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let preview = Paragraph::new(format!(
-            " → {} cards  [{}]",
-            count,
-            self.mode.label(),
-        ))
-        .style(preview_style);
-        frame.render_widget(preview, chunks[2]);
+        frame.render_widget(
+            Paragraph::new(format!(" → {} cards  [{}]", count, self.mode.label())).style(preview_style),
+            chunks[2],
+        );
 
-        frame.render_widget(&self.author_area, chunks[3]);
-        frame.render_widget(&self.tags_area, chunks[4]);
+        frame.render_widget(&self.title_area, chunks[3]);
+        frame.render_widget(&self.author_area, chunks[4]);
+        frame.render_widget(&self.tags_area, chunks[5]);
 
-        let footer = Paragraph::new(Line::from(vec![
-            Span::styled("[Ctrl+Enter]", Style::default().fg(Color::Yellow)),
-            Span::raw(" Save  "),
-            Span::styled("[Tab/S-Tab]", Style::default().fg(Color::Cyan)),
-            Span::raw(" Cycle fields  "),
-            Span::styled("[g]", Style::default().fg(Color::Green)),
-            Span::raw(" Toggle mode  "),
-            Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
-            Span::raw(" Cancel"),
-        ]));
-        frame.render_widget(footer, chunks[5]);
+        frame.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled("[Ctrl+Enter]", Style::default().fg(Color::Yellow)),
+                Span::raw(" Save  "),
+                Span::styled("[Tab/S-Tab]", Style::default().fg(Color::Cyan)),
+                Span::raw(" Cycle fields  "),
+                Span::styled("[g]", Style::default().fg(Color::Green)),
+                Span::raw(" Toggle mode  "),
+                Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
+                Span::raw(" Cancel"),
+            ])),
+            chunks[6],
+        );
     }
 }

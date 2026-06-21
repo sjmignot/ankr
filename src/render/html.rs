@@ -1,5 +1,9 @@
 /// Strip HTML tags and decode entities from Anki field content.
 pub fn strip(html: &str) -> String {
+    if !html.contains('<') {
+        // Plain text — preserve newlines as-is.
+        return html.trim().to_string();
+    }
     html2text::from_read(html.as_bytes(), 10000)
         .unwrap_or_else(|_| html.to_string())
         .lines()

@@ -10,7 +10,7 @@ use ratatui::{
 use crossterm::event::{KeyCode, KeyEvent};
 use tui_textarea::TextArea;
 use crate::models::*;
-use crate::render::{cloze, html, image as img_render};
+use crate::render::{cloze::{self, ANSWER_END, ANSWER_START}, html, image as img_render};
 
 pub enum ReviewAction {
     None,
@@ -86,7 +86,6 @@ impl ReviewScreen {
                     self.side = Side::Answer(typed);
                     ReviewAction::None
                 }
-                KeyCode::Char('q') if key.modifiers.is_empty() => ReviewAction::Quit,
                 KeyCode::Esc => ReviewAction::Back,
                 _ => {
                     self.answer_input.input(*key);
@@ -184,6 +183,12 @@ impl ReviewScreen {
         }
     }
 
+    fn poem_title(&self) -> Option<String> {
+        self.note.tags.iter()
+            .find(|t| t.starts_with("title:"))
+            .map(|t| t["title:".len()..].replace('_', " "))
+    }
+
     fn render_header(&self, frame: &mut Frame, area: Rect) {
         let kind = match self.note.notetype.kind {
             NoteKind::Cloze => "cloze",
@@ -193,12 +198,29 @@ impl ReviewScreen {
             Side::Question => "question",
             Side::Answer(_) => "answer",
         };
-        let header = Paragraph::new(format!(
-            "{} · {} · {}",
-            self.note.notetype.name, kind, side_label
-        ))
-        .style(Style::default().fg(Color::DarkGray));
-        frame.render_widget(header, area);
+        let meta = format!("{} · {} · {}", self.note.notetype.name, kind, side_label);
+
+        if let Some(title) = self.poem_title() {
+            // Two-line header: title on top, meta below
+            let chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([Constraint::Length(1), Constraint::Length(1)])
+                .split(area);
+            frame.render_widget(
+                Paragraph::new(title)
+                    .style(Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+                chunks[0],
+            );
+            frame.render_widget(
+                Paragraph::new(meta).style(Style::default().fg(Color::DarkGray)),
+                chunks[1],
+            );
+        } else {
+            frame.render_widget(
+                Paragraph::new(meta).style(Style::default().fg(Color::DarkGray)),
+                area,
+            );
+        }
     }
 
     fn render_content(&self, frame: &mut Frame, area: Rect) {
@@ -223,7 +245,7 @@ impl ReviewScreen {
                 };
                 let mut lines: Vec<Line<'static>> = rendered
                     .lines()
-                    .map(|l| Line::from(l.to_string()))
+                    .map(|l| styled_cloze_line(l))
                     .collect();
                 if let Side::Answer(typed) = &self.side {
                     if !typed.is_empty() {
@@ -312,8 +334,8 @@ impl ReviewScreen {
                 Span::raw(" Reveal  "),
                 Span::styled("[Space]", Style::default().fg(Color::DarkGray)),
                 Span::raw(" Skip input  "),
-                Span::styled("[q]", Style::default().fg(Color::DarkGray)),
-                Span::raw(" Quit  "),
+                Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
+                Span::raw(" Back  "),
                 Span::styled("[c]", Style::default().fg(Color::Cyan)),
                 Span::raw(" Create  "),
                 Span::styled("[a]", Style::default().fg(Color::Cyan)),
@@ -352,25 +374,60 @@ fn extract_cloze_answer(text: &str, active_ord: u32) -> String {
         .unwrap_or_default()
 }
 
+/// Convert a raw rendered cloze line (which may contain sentinel markers) into a styled Line.
+fn styled_cloze_line(raw: &str) -> Line<'static> {
+    if let (Some(s), Some(e)) = (raw.find(ANSWER_START), raw.find(ANSWER_END)) {
+        let before = raw[..s].to_string();
+        let answer = raw[s + ANSWER_START.len()..e].to_string();
+        let after = raw[e + ANSWER_END.len()..].to_string();
+        Line::from(vec![
+            Span::raw(before),
+            Span::styled(answer, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(after),
+        ])
+    } else {
+        Line::from(raw.to_string())
+    }
+}
+
 fn comparison_lines(typed: &str, correct: &str) -> Vec<Line<'static>> {
     let matched = typed.trim().to_lowercase() == correct.trim().to_lowercase();
-    let (icon, color) = if matched { ("✓", Color::Green) } else { ("✗", Color::Red) };
-
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            format!("{icon} You typed: "),
-            Style::default().fg(color).add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(typed.to_string()),
-    ])];
-    if !matched {
-        lines.push(Line::from(vec![
-            Span::styled(
-                "  Correct:   ",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(correct.to_string()),
-        ]));
+    if matched {
+        return vec![Line::from(vec![
+            Span::styled("✓ ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::raw(typed.to_string()),
+        ])];
     }
-    lines
+
+    // Word-level diff using dissimilar
+    let chunks = dissimilar::diff(correct.trim(), typed.trim());
+    let mut typed_spans: Vec<Span<'static>> = vec![
+        Span::styled("✗ typed:   ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+    ];
+    let mut correct_spans: Vec<Span<'static>> = vec![
+        Span::styled("  correct: ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+    ];
+    for chunk in &chunks {
+        match chunk {
+            dissimilar::Chunk::Equal(s) => {
+                typed_spans.push(Span::raw(s.to_string()));
+                correct_spans.push(Span::raw(s.to_string()));
+            }
+            dissimilar::Chunk::Delete(s) => {
+                // In correct but not in typed — highlight missing in correct line
+                correct_spans.push(Span::styled(
+                    s.to_string(),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::UNDERLINED),
+                ));
+            }
+            dissimilar::Chunk::Insert(s) => {
+                // In typed but not in correct — highlight extra in typed line
+                typed_spans.push(Span::styled(
+                    s.to_string(),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::UNDERLINED),
+                ));
+            }
+        }
+    }
+    vec![Line::from(typed_spans), Line::from(correct_spans)]
 }
