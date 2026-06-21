@@ -77,6 +77,14 @@ impl PoemCreateScreen {
                 };
                 return PoemCreateAction::None;
             }
+            KeyCode::BackTab => {
+                self.focus = match self.focus {
+                    PoemFocus::Poem => PoemFocus::Tags,
+                    PoemFocus::Tags => PoemFocus::Author,
+                    PoemFocus::Author => PoemFocus::Poem,
+                };
+                return PoemCreateAction::None;
+            }
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 return self.build_cards();
             }
