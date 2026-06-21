@@ -207,7 +207,7 @@ impl PoemCreateScreen {
         let footer = Paragraph::new(Line::from(vec![
             Span::styled("[Ctrl+Enter]", Style::default().fg(Color::Yellow)),
             Span::raw(" Save  "),
-            Span::styled("[Tab]", Style::default().fg(Color::Cyan)),
+            Span::styled("[Tab/S-Tab]", Style::default().fg(Color::Cyan)),
             Span::raw(" Cycle fields  "),
             Span::styled("[g]", Style::default().fg(Color::Green)),
             Span::raw(" Toggle mode  "),
