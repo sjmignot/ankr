@@ -10,7 +10,6 @@ use crossterm::{
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode, disable_raw_mode},
 };
 use ratatui::{Terminal, backend::CrosstermBackend};
-use ratatui_image::picker::Picker;
 use tokio::sync::mpsc;
 
 use crate::db::{DbConn, queries};
@@ -54,9 +53,7 @@ pub async fn run(db: DbConn, config: AppConfig) -> anyhow::Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let picker = Picker::from_query_stdio().ok();
-
-    let result = run_app(&mut terminal, db, config, picker).await;
+    let result = run_app(&mut terminal, db, config).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
@@ -69,7 +66,6 @@ async fn run_app(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     db: DbConn,
     config: AppConfig,
-    picker: Option<Picker>,
 ) -> anyhow::Result<()> {
     let crt = queries::get_collection_crt(&db.conn)?;
 
@@ -142,7 +138,7 @@ async fn run_app(
                         if let Some(card) = queue.next() {
                             let note = queries::get_resolved_note(&db.conn, &card)?;
                             screen = Screen::Review {
-                                screen: ReviewScreen::new(card, note, picker.clone(), config.media_dir.clone()),
+                                screen: ReviewScreen::new(card, note, config.media_dir.clone()),
                                 queue,
                                 scheduler: FsrsScheduler::new(0.9),
                                 crt,
@@ -201,7 +197,7 @@ async fn run_app(
 
                         if let Some(next_card) = queue.next() {
                             let note = queries::get_resolved_note(&db.conn, &next_card)?;
-                            *rev = ReviewScreen::new(next_card, note, picker.clone(), config.media_dir.clone());
+                            *rev = ReviewScreen::new(next_card, note, config.media_dir.clone());
                         } else {
                             let stats = queue.stats.clone();
                             screen = Screen::Done(DoneScreen::new(stats));

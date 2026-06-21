@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use once_cell::sync::Lazy;
 use regex::Regex;
 use lru::LruCache;
@@ -30,15 +30,11 @@ impl ImageCache {
 
     pub fn get(&mut self, src: &str) -> Option<DynamicImage> {
         if !self.cache.contains(src) {
-            let path = self.resolve(src)?;
+            let path = self.media_dir.join(src);
+            if !path.exists() { return None; }
             let img = image::open(&path).ok()?;
             self.cache.put(src.to_string(), img);
         }
         self.cache.get(src).cloned()
-    }
-
-    pub fn resolve(&self, src: &str) -> Option<PathBuf> {
-        let p = self.media_dir.join(src);
-        if p.exists() { Some(p) } else { None }
     }
 }
