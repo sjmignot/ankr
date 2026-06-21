@@ -152,16 +152,19 @@ async fn run_app(
 
             // ── Review ───────────────────────────────────────────────────────
             Screen::Review { screen: rev, queue, scheduler, crt: review_crt, deck_id, notetype_id } => {
-                match key.code {
-                    KeyCode::Char('c') => {
-                        screen = Screen::Create(CreateScreen::new(*deck_id, *notetype_id));
-                        continue;
+                // Only intercept [c]/[a] when not actively typing an answer.
+                if !rev.is_typing() {
+                    match key.code {
+                        KeyCode::Char('c') => {
+                            screen = Screen::Create(CreateScreen::new(*deck_id, *notetype_id));
+                            continue;
+                        }
+                        KeyCode::Char('a') => {
+                            screen = Screen::AiCreate(AiCreateScreen::new(*deck_id, *notetype_id));
+                            continue;
+                        }
+                        _ => {}
                     }
-                    KeyCode::Char('a') => {
-                        screen = Screen::AiCreate(AiCreateScreen::new(*deck_id, *notetype_id));
-                        continue;
-                    }
-                    _ => {}
                 }
 
                 match rev.handle_key(&key) {
