@@ -40,6 +40,15 @@ struct SyncHeader<'a> {
     s: &'a str,
 }
 
+// ── Graves format ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Default)]
+struct Graves {
+    #[serde(default)] cards: Vec<i64>,
+    #[serde(default)] notes: Vec<i64>,
+    #[serde(default)] decks: Vec<i64>,
+}
+
 // ── Chunk format ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Default)]
@@ -203,6 +212,7 @@ impl SyncClient {
         #[derive(Deserialize, Default)]
         struct StartResp {
             #[serde(rename = "fullSync", default)] full_sync: bool,
+            #[serde(default)] graves: Graves,
         }
         let l_newer = local_mod >= meta.server_mod;
         let start: StartResp = self.post("start", &StartReq { min_usn: local_usn, l_newer, graves: None }).await?;
@@ -213,6 +223,15 @@ impl SyncClient {
                  Open Anki desktop, sync there once to establish a baseline, then use ankr sync."
             );
         }
+
+        // ── applyGraves ───────────────────────────────────────────────────
+        // Protocol: client applies server's graves locally, then echoes them back
+        // to the server wrapped in "chunk" (not "graves") as confirmation.
+        eprintln!("  applyGraves…");
+        apply_server_graves(conn, &start.graves)?;
+        #[derive(Serialize)]
+        struct ApplyGravesReq { chunk: Graves }
+        let _: Value = self.post("applyGraves", &ApplyGravesReq { chunk: start.graves }).await?;
 
         // ── applyChanges ──────────────────────────────────────────────────
         eprintln!("  applyChanges…");
@@ -243,6 +262,15 @@ impl SyncClient {
             },
         }).await?;
 
+        // ── Collect local changes BEFORE pulling server chunks ────────────
+        // Server chunks arrive with usn=-1; if we collected after, we'd
+        // reflect the server's own cards back at it in applyChunk.
+        eprintln!("  collecting local changes…");
+        let local_chunk = collect_local_changes(conn)?;
+        let pushed_cards  = local_chunk.cards.len();
+        let pushed_revlog = local_chunk.revlog.len();
+        let pushed_notes  = local_chunk.notes.len();
+
         // ── Pull server chunks ────────────────────────────────────────────
         eprintln!("  pulling server chunks…");
         let mut pulled_cards = 0usize;
@@ -255,34 +283,26 @@ impl SyncClient {
             apply_server_chunk(conn, server_chunk)?;
             if done { break; }
         }
-
-        // ── Push local changes ────────────────────────────────────────────
-        eprintln!("  pushing local changes…");
-        let local_chunk = collect_local_changes(conn)?;
-        let pushed_cards  = local_chunk.cards.len();
-        let pushed_revlog = local_chunk.revlog.len();
-        let pushed_notes  = local_chunk.notes.len();
-        let _: Value = self.post("applyChunk", &local_chunk).await?;
+        // Server expects {"chunk": {...}} wrapper (ApplyChunkRequest), not a bare Chunk.
+        #[derive(Serialize)]
+        struct ApplyChunkReq { chunk: Chunk }
+        let _: Value = self.post("applyChunk", &ApplyChunkReq { chunk: local_chunk }).await?;
 
         // ── Finish ────────────────────────────────────────────────────────
         eprintln!("  finish…");
         #[derive(Serialize)]
         struct Empty {}
-        #[derive(Deserialize)]
-        struct FinishResp {
-            #[serde(rename = "mod")] new_mod: i64,
-            usn: i64,
-            #[serde(default)] msg: String,
-        }
-        let finish: FinishResp = self.post("finish", &Empty {}).await?;
+        // v11: finish returns the new server mod as a bare JSON integer.
+        let new_mod: i64 = self.post("finish", &Empty {}).await?;
+        let new_usn = meta.usn;
 
-        let new_usn = finish.usn;
         conn.execute("UPDATE cards  SET usn=?1 WHERE usn=-1", params![new_usn])?;
         conn.execute("UPDATE revlog SET usn=?1 WHERE usn=-1", params![new_usn])?;
         conn.execute("UPDATE notes  SET usn=?1 WHERE usn=-1", params![new_usn])?;
+        conn.execute("UPDATE graves SET usn=?1 WHERE usn=-1", params![new_usn])?;
         conn.execute(
             "UPDATE col SET usn=?1, ls=?2, mod=?3",
-            params![new_usn, finish.new_mod, finish.new_mod],
+            params![new_usn, new_mod, new_mod],
         )?;
 
         Ok(SyncSummary {
@@ -290,7 +310,7 @@ impl SyncClient {
             pushed_revlog,
             pushed_notes,
             pulled_cards,
-            server_msg: finish.msg,
+            server_msg: String::new(),
         })
     }
 }
@@ -395,6 +415,21 @@ fn collect_local_changes(conn: &Connection) -> Result<Chunk> {
 
 fn jnum(n: i64) -> Value {
     Value::Number(n.into())
+}
+
+// ── Graves helpers ────────────────────────────────────────────────────────────
+
+fn apply_server_graves(conn: &Connection, graves: &Graves) -> Result<()> {
+    for id in &graves.cards {
+        conn.execute("DELETE FROM cards WHERE id=?1", params![id])?;
+    }
+    for id in &graves.notes {
+        conn.execute("DELETE FROM notes WHERE id=?1", params![id])?;
+    }
+    for id in &graves.decks {
+        conn.execute("DELETE FROM decks WHERE id=?1", params![id])?;
+    }
+    Ok(())
 }
 
 // ── Apply server chunk ────────────────────────────────────────────────────────

@@ -63,6 +63,41 @@ pub fn create_deck(conn: &Connection, name: &str) -> Result<i64> {
     Ok(id)
 }
 
+/// Resolve a `::` -separated deck path, creating any missing ancestors along
+/// the way, and return the leaf deck's id.
+///
+/// e.g. `"Poetry::Keats::Ode to Autumn"` ensures three decks exist and
+/// returns the id of the deepest one.
+pub fn get_or_create_deck_path(conn: &Connection, path: &str) -> Result<i64> {
+    let mut prefix = String::new();
+    let mut last_id = 0i64;
+    for (i, part) in path.split("::").enumerate() {
+        if i > 0 { prefix.push_str("::"); }
+        prefix.push_str(part);
+        // DB stores \x1f as hierarchy separator.
+        let db_name = prefix.replace("::", "\x1f");
+        let existing: Option<i64> = conn
+            .query_row("SELECT id FROM decks WHERE name=?1", params![db_name], |r| r.get(0))
+            .ok();
+        last_id = match existing {
+            Some(id) => id,
+            None => {
+                // Offset by depth to avoid ms-level id collisions.
+                let id = now_ms() + i as i64;
+                let kind: &[u8] = &[0x0a, 0x00];
+                let common: &[u8] = &[];
+                conn.execute(
+                    "INSERT INTO decks (id, name, mtime_secs, usn, common, kind) \
+                     VALUES (?1, ?2, ?3, -1, ?4, ?5)",
+                    params![id, db_name, now_unix(), common, kind],
+                )?;
+                id
+            }
+        };
+    }
+    Ok(last_id)
+}
+
 pub fn get_due_counts(conn: &Connection, deck_id: i64, today: i64, now: i64) -> Result<(u32, u32, u32)> {
     let new: u32 = conn.query_row(
         "SELECT COUNT(*) FROM cards WHERE did=?1 AND queue=0",
