@@ -1,37 +1,46 @@
 use anyhow::{bail, Context, Result};
-use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use rusqlite::{Connection, params};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
-use std::io::{Read, Write};
+use std::io::Read;
 
-const BASE: &str = "https://sync.ankiweb.net/sync/";
-const SYNC_VER: u64 = 8;
-const CLIENT_VER: &str = "ankr,0.1.0,linux:unknown:unknown";
+const BASE: &str = "https://sync.ankiweb.net/";
+const SYNC_VER: u8 = 11;
+// Exact values captured via mitmproxy from real Anki 25.09.4 client.
+// Server validates the format; using our own identifiers may cause 400.
+const CLIENT_VER_HEADER: &str = "25.09.4,d52ca669,linux";
+const CLIENT_VER_BODY:   &str = "anki,25.09.4 (d52ca669),lin:nixos:26.05";
 
-// ── Gzip helpers ─────────────────────────────────────────────────────────────
+// ── Zstd helpers ──────────────────────────────────────────────────────────────
 
-fn gz(v: &impl Serialize) -> Result<Vec<u8>> {
+fn zstd_enc(v: &impl Serialize) -> Result<Vec<u8>> {
     let json = serde_json::to_vec(v)?;
-    let mut enc = GzEncoder::new(Vec::new(), Compression::default());
-    enc.write_all(&json)?;
-    Ok(enc.finish()?)
+    Ok(zstd::encode_all(json.as_slice(), 0)?)
 }
 
-fn ungz<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
-    if bytes.starts_with(&[0x1f, 0x8b]) {
-        let mut dec = GzDecoder::new(bytes);
+fn zstd_dec<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<T> {
+    // Server may respond uncompressed if the payload is tiny.
+    if bytes.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) {
+        let mut dec = zstd::Decoder::new(bytes)?;
         let mut out = Vec::new();
         dec.read_to_end(&mut out)?;
-        serde_json::from_slice(&out).context("JSON parse error in gzip response")
+        serde_json::from_slice(&out).context("JSON parse error in zstd response")
     } else {
         serde_json::from_slice(bytes).context("JSON parse error in response")
     }
 }
 
-// ── Chunk format ─────────────────────────────────────────────────────────────
-// Rows are tuples serialised as JSON arrays, matching Anki's wire format.
+// ── Sync header (sent on every request) ──────────────────────────────────────
+
+#[derive(Serialize)]
+struct SyncHeader<'a> {
+    v: u8,
+    k: &'a str,
+    c: &'static str,
+    s: &'a str,
+}
+
+// ── Chunk format ──────────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Default)]
 struct Chunk {
@@ -44,65 +53,60 @@ struct Chunk {
 // ── Sync client ───────────────────────────────────────────────────────────────
 
 pub struct SyncClient {
-    http: reqwest::Client,
-    hkey: String,
+    http:     reqwest::Client,
+    hkey:     String,
+    session:  String,
+    endpoint: String,  // base URL, may be redirected to sync4.ankiweb.net etc.
 }
 
 impl SyncClient {
-    /// Authenticate with AnkiWeb and return an authenticated client.
-    ///
-    /// AnkiWeb expects `p = sha256(username + ":" + password)` (hex-encoded).
     pub async fn login(username: &str, password: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .user_agent("Anki/23.12.1 (Linux)")
-            .timeout(std::time::Duration::from_secs(30))
+            .timeout(std::time::Duration::from_secs(60))
+            .redirect(reqwest::redirect::Policy::none())
             .build()?;
 
-        let hashed_pw = {
-            let mut h = Sha256::new();
-            h.update(password.as_bytes());
-            format!("{:x}", h.finalize())
-        };
+        let session = simple_session_id();
 
         #[derive(Serialize)]
         struct Creds<'a> { u: &'a str, p: &'a str }
         #[derive(Deserialize)]
         struct LoginResp { key: Option<String> }
 
-        eprintln!("  POST {BASE}hostKey …");
-        let resp = http.post(format!("{BASE}hostKey"))
+        eprintln!("  POST {BASE}sync/hostKey …");
+        let header = SyncHeader { v: SYNC_VER, k: "", c: CLIENT_VER_HEADER, s: &session };
+        let resp = http.post(format!("{BASE}sync/hostKey"))
             .header("Content-Type", "application/octet-stream")
-            .body(gz(&Creds { u: username, p: &hashed_pw })?)
+            .header("anki-sync", serde_json::to_string(&header)?)
+            .body(zstd_enc(&Creds { u: username, p: password })?)
             .send().await?;
 
         let status = resp.status();
         let bytes = resp.bytes().await?;
 
         if !status.is_success() {
-            let body = String::from_utf8_lossy(&bytes);
             bail!(
                 "AnkiWeb login failed: HTTP {status}\nResponse: {}",
-                if body.is_empty() { "(empty)" } else { &body }
+                String::from_utf8_lossy(&bytes)
             );
         }
 
-        let login: LoginResp = ungz(&bytes).with_context(|| {
-            format!(
-                "Could not parse login response (HTTP {status}): {}",
-                String::from_utf8_lossy(&bytes)
-            )
-        })?;
+        let login: LoginResp = zstd_dec(&bytes)?;
         let hkey = login.key.context("Login succeeded but AnkiWeb returned no host key")?;
-        Ok(Self { http, hkey })
+        Ok(Self { http, hkey, session, endpoint: BASE.to_string() })
     }
 
     async fn post<Req, Resp>(&self, endpoint: &str, req: &Req) -> Result<Resp>
     where Req: Serialize, Resp: for<'de> Deserialize<'de>
     {
-        let resp = self.http.post(format!("{BASE}{endpoint}"))
+        let body_json = serde_json::to_vec(req)?;
+        eprintln!("  [dbg] /{endpoint} body: {}", String::from_utf8_lossy(&body_json));
+        let header = SyncHeader { v: SYNC_VER, k: &self.hkey, c: CLIENT_VER_HEADER, s: &self.session };
+        let resp = self.http.post(format!("{}sync/{endpoint}", self.endpoint))
             .header("Content-Type", "application/octet-stream")
-            .header("Authorization", format!("hkey {}", self.hkey))
-            .body(gz(req)?)
+            .header("anki-sync", serde_json::to_string(&header)?)
+            .body(zstd::encode_all(body_json.as_slice(), 0)?)
             .send().await?;
         let status = resp.status();
         let bytes = resp.bytes().await?;
@@ -112,29 +116,28 @@ impl SyncClient {
                 String::from_utf8_lossy(&bytes)
             );
         }
-        ungz(&bytes).with_context(|| {
+        let decoded: Resp = zstd_dec(&bytes).with_context(|| {
             format!(
                 "Could not parse /{endpoint} response: {}",
                 String::from_utf8_lossy(&bytes)
             )
-        })
+        })?;
+        Ok(decoded)
     }
 
-    /// Perform an incremental sync against AnkiWeb.
-    ///
-    /// Sends local changes (cards/revlog/notes with usn=-1), pulls server
-    /// changes (reviews done on other devices), and updates col.usn / col.ls.
-    pub async fn sync(self, conn: &Connection) -> Result<SyncSummary> {
-        // ── Local state ───────────────────────────────────────────────────
+    pub async fn sync(mut self, conn: &Connection) -> Result<SyncSummary> {
         let (local_mod, local_usn, local_scm): (i64, i64, i64) = conn.query_row(
             "SELECT mod, usn, scm FROM col LIMIT 1",
             [],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
 
-        // ── Meta ──────────────────────────────────────────────────────────
+        // ── Meta (reqwest follows the 308 to the assigned sync server) ───────
+        // AnkiWeb routes each account to syncN.ankiweb.net via 308 redirect.
+        // We let reqwest follow it, then read resp.url() to update our endpoint.
+        eprintln!("  meta…");
         #[derive(Serialize)]
-        struct MetaReq { v: u64, cv: &'static str }
+        struct MetaReq { v: u8, cv: &'static str }
         #[derive(Deserialize)]
         struct MetaResp {
             scm: i64,
@@ -142,8 +145,43 @@ impl SyncClient {
             usn: i64,
         }
 
-        eprintln!("  meta…");
-        let meta: MetaResp = self.post("meta", &MetaReq { v: SYNC_VER, cv: CLIENT_VER }).await?;
+        let meta: MetaResp = {
+            let send_meta = |endpoint: &str, hkey: &str, session: &str| {
+                let header = SyncHeader { v: SYNC_VER, k: hkey, c: CLIENT_VER_HEADER, s: session };
+                self.http
+                    .post(format!("{endpoint}sync/meta"))
+                    .header("Content-Type", "application/octet-stream")
+                    .header("anki-sync", serde_json::to_string(&header).unwrap())
+                    .body(zstd_enc(&MetaReq { v: SYNC_VER, cv: CLIENT_VER_BODY }).unwrap())
+            };
+
+            // First attempt — may 308-redirect to the assigned sync server.
+            let r1 = send_meta(&self.endpoint, &self.hkey, &self.session).send().await?;
+            let r1_status = r1.status();
+
+            let resp = if r1_status.as_u16() == 308 {
+                // 308 Location is the new BASE (e.g. https://sync4.ankiweb.net/).
+                // Append /sync/meta and resend — do not follow the redirect blindly.
+                let loc = r1.headers()
+                    .get("location")
+                    .and_then(|v| v.to_str().ok())
+                    .context("308 without Location header")?
+                    .to_string();
+                let new_base = if loc.ends_with('/') { loc } else { format!("{loc}/") };
+                eprintln!("  → assigned to {new_base}");
+                self.endpoint = new_base;
+                send_meta(&self.endpoint, &self.hkey, &self.session).send().await?
+            } else {
+                r1
+            };
+
+            let status = resp.status();
+            let bytes = resp.bytes().await?;
+            if !status.is_success() {
+                bail!("AnkiWeb /meta failed: HTTP {status}\nResponse: {}", String::from_utf8_lossy(&bytes));
+            }
+            zstd_dec(&bytes).context("parsing meta response")?
+        };
 
         if meta.scm != local_scm {
             bail!(
@@ -154,22 +192,20 @@ impl SyncClient {
         }
 
         // ── Start ─────────────────────────────────────────────────────────
+        eprintln!("  start…");
+        // v11 protocol: graves are included inline in the start body (null = no local graves).
         #[derive(Serialize)]
         struct StartReq {
             #[serde(rename = "minUsn")] min_usn: i64,
             #[serde(rename = "lnewer")] l_newer: bool,
+            graves: Option<()>,
         }
         #[derive(Deserialize, Default)]
         struct StartResp {
             #[serde(rename = "fullSync", default)] full_sync: bool,
         }
-
-        eprintln!("  start…");
         let l_newer = local_mod >= meta.server_mod;
-        let start: StartResp = self.post("start", &StartReq {
-            min_usn: local_usn,
-            l_newer,
-        }).await?;
+        let start: StartResp = self.post("start", &StartReq { min_usn: local_usn, l_newer, graves: None }).await?;
 
         if start.full_sync {
             bail!(
@@ -178,33 +214,36 @@ impl SyncClient {
             );
         }
 
-        // ── Step 4: Send graves (deleted notes/cards) — we have none ─────
-        #[derive(Serialize)]
-        struct ApplyGravesReq { chunk: GravesChunk }
-        #[derive(Serialize, Default)]
-        struct GravesChunk { notes: Vec<i64>, cards: Vec<i64>, decks: Vec<i64> }
-        eprintln!("  applyGraves…");
-        let _: Value = self.post("applyGraves", &ApplyGravesReq {
-            chunk: GravesChunk::default(),
-        }).await?;
-
-        // ── Step 5: applyChanges — send/receive config changes ────────────
-        // We have no config changes; server may respond with its own.
-        #[derive(Serialize)]
-        struct ApplyChangesReq { changes: NoChanges }
-        #[derive(Serialize, Default)]
-        struct NoChanges {
-            models: Vec<Value>,
-            decks: Vec<Value>,
-            tags: Vec<Value>,
-            #[serde(rename = "cconf")] deck_config: Vec<Value>,
-        }
+        // ── applyChanges ──────────────────────────────────────────────────
         eprintln!("  applyChanges…");
+        // v11 format (from rslib/src/sync/collection/changes.rs):
+        //   models = Vec<Notetype>
+        //   decks  = { "decks": Vec<Deck>, "config": Vec<DeckConfig> }  ← nested object, NOT array
+        //   tags   = Vec<String>
+        //   conf   = Option<HashMap>  (collection config, optional)
+        //   crt    = Option<i64>      (creation stamp, optional)
+        #[derive(Serialize)]
+        struct ApplyChangesReq { changes: UnchunkedChanges }
+        #[derive(Serialize)]
+        struct UnchunkedChanges {
+            models: Vec<Value>,
+            decks:  DecksAndConfig,
+            tags:   Vec<Value>,
+        }
+        #[derive(Serialize)]
+        struct DecksAndConfig {
+            decks:  Vec<Value>,
+            config: Vec<Value>,
+        }
         let _: Value = self.post("applyChanges", &ApplyChangesReq {
-            changes: NoChanges::default(),
+            changes: UnchunkedChanges {
+                models: vec![],
+                decks:  DecksAndConfig { decks: vec![], config: vec![] },
+                tags:   vec![],
+            },
         }).await?;
 
-        // ── Step 6: Pull server chunks ────────────────────────────────────
+        // ── Pull server chunks ────────────────────────────────────────────
         eprintln!("  pulling server chunks…");
         let mut pulled_cards = 0usize;
         loop {
@@ -217,15 +256,16 @@ impl SyncClient {
             if done { break; }
         }
 
-        // ── Step 7: Push our local changes ───────────────────────────────
+        // ── Push local changes ────────────────────────────────────────────
         eprintln!("  pushing local changes…");
         let local_chunk = collect_local_changes(conn)?;
-        let pushed_cards   = local_chunk.cards.len();
-        let pushed_revlog  = local_chunk.revlog.len();
-        let pushed_notes   = local_chunk.notes.len();
+        let pushed_cards  = local_chunk.cards.len();
+        let pushed_revlog = local_chunk.revlog.len();
+        let pushed_notes  = local_chunk.notes.len();
         let _: Value = self.post("applyChunk", &local_chunk).await?;
 
         // ── Finish ────────────────────────────────────────────────────────
+        eprintln!("  finish…");
         #[derive(Serialize)]
         struct Empty {}
         #[derive(Deserialize)]
@@ -234,11 +274,8 @@ impl SyncClient {
             usn: i64,
             #[serde(default)] msg: String,
         }
-
-        eprintln!("  finish…");
         let finish: FinishResp = self.post("finish", &Empty {}).await?;
 
-        // Mark all locally-changed records as synced with the new USN.
         let new_usn = finish.usn;
         conn.execute("UPDATE cards  SET usn=?1 WHERE usn=-1", params![new_usn])?;
         conn.execute("UPDATE revlog SET usn=?1 WHERE usn=-1", params![new_usn])?;
@@ -266,10 +303,20 @@ pub struct SyncSummary {
     pub server_msg:    String,
 }
 
+// ── Session ID ────────────────────────────────────────────────────────────────
+
+fn simple_session_id() -> String {
+    let table = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .subsec_nanos() as usize;
+    (0..8).map(|i| table[(n.wrapping_shr(i * 4)) % table.len()] as char).collect()
+}
+
 // ── Local change collection ───────────────────────────────────────────────────
 
 fn collect_local_changes(conn: &Connection) -> Result<Chunk> {
-    // Cards: id nid did ord mod [usn=-1] type queue due ivl factor reps lapses left odue odid flags data
     let cards = {
         let mut stmt = conn.prepare(
             "SELECT id,nid,did,ord,mod,type,queue,due,ivl,factor,reps,lapses,left,odue,odid,flags,data \
@@ -277,68 +324,67 @@ fn collect_local_changes(conn: &Connection) -> Result<Chunk> {
         )?;
         let rows: Vec<_> = stmt.query_map([], |r| {
             Ok(vec![
-                jnum(r.get::<_,i64>(0)?),   // id
-                jnum(r.get::<_,i64>(1)?),   // nid
-                jnum(r.get::<_,i64>(2)?),   // did
-                jnum(r.get::<_,i64>(3)?),   // ord
-                jnum(r.get::<_,i64>(4)?),   // mod
-                jnum(-1i64),                 // usn (sent as -1; server assigns real USN)
-                jnum(r.get::<_,i64>(5)?),   // type
-                jnum(r.get::<_,i64>(6)?),   // queue
-                jnum(r.get::<_,i64>(7)?),   // due
-                jnum(r.get::<_,i64>(8)?),   // ivl
-                jnum(r.get::<_,i64>(9)?),   // factor
-                jnum(r.get::<_,i64>(10)?),  // reps
-                jnum(r.get::<_,i64>(11)?),  // lapses
-                jnum(r.get::<_,i64>(12)?),  // left
-                jnum(r.get::<_,i64>(13)?),  // odue
-                jnum(r.get::<_,i64>(14)?),  // odid
-                jnum(r.get::<_,i64>(15)?),  // flags
-                Value::String(r.get::<_,String>(16)?), // data
+                jnum(r.get::<_,i64>(0)?),
+                jnum(r.get::<_,i64>(1)?),
+                jnum(r.get::<_,i64>(2)?),
+                jnum(r.get::<_,i64>(3)?),
+                jnum(r.get::<_,i64>(4)?),
+                jnum(-1i64),
+                jnum(r.get::<_,i64>(5)?),
+                jnum(r.get::<_,i64>(6)?),
+                jnum(r.get::<_,i64>(7)?),
+                jnum(r.get::<_,i64>(8)?),
+                jnum(r.get::<_,i64>(9)?),
+                jnum(r.get::<_,i64>(10)?),
+                jnum(r.get::<_,i64>(11)?),
+                jnum(r.get::<_,i64>(12)?),
+                jnum(r.get::<_,i64>(13)?),
+                jnum(r.get::<_,i64>(14)?),
+                jnum(r.get::<_,i64>(15)?),
+                Value::String(r.get::<_,String>(16)?),
             ])
         })?.filter_map(|r| r.ok()).collect();
         rows
     };
 
-    // Revlog: id cid [usn=-1] ease ivl lastIvl factor time type
     let revlog = {
         let mut stmt = conn.prepare(
             "SELECT id,cid,ease,ivl,lastIvl,factor,time,type FROM revlog WHERE usn=-1"
         )?;
         let rows: Vec<_> = stmt.query_map([], |r| {
             Ok(vec![
-                jnum(r.get::<_,i64>(0)?),   // id
-                jnum(r.get::<_,i64>(1)?),   // cid
-                jnum(-1i64),                 // usn
-                jnum(r.get::<_,i64>(2)?),   // ease
-                jnum(r.get::<_,i64>(3)?),   // ivl
-                jnum(r.get::<_,i64>(4)?),   // lastIvl
-                jnum(r.get::<_,i64>(5)?),   // factor
-                jnum(r.get::<_,i64>(6)?),   // time
-                jnum(r.get::<_,i64>(7)?),   // type
+                jnum(r.get::<_,i64>(0)?),
+                jnum(r.get::<_,i64>(1)?),
+                jnum(-1i64),
+                jnum(r.get::<_,i64>(2)?),
+                jnum(r.get::<_,i64>(3)?),
+                jnum(r.get::<_,i64>(4)?),
+                jnum(r.get::<_,i64>(5)?),
+                jnum(r.get::<_,i64>(6)?),
+                jnum(r.get::<_,i64>(7)?),
             ])
         })?.filter_map(|r| r.ok()).collect();
         rows
     };
 
-    // Notes: id guid mid mod [usn=-1] tags flds sfld csum flags data
     let notes = {
+        // v11: sfld and csum are always empty strings in NoteEntry (server recomputes them).
         let mut stmt = conn.prepare(
-            "SELECT id,guid,mid,mod,tags,flds,sfld,csum,flags,data FROM notes WHERE usn=-1"
+            "SELECT id,guid,mid,mod,tags,flds,flags,data FROM notes WHERE usn=-1"
         )?;
         let rows: Vec<_> = stmt.query_map([], |r| {
             Ok(vec![
-                jnum(r.get::<_,i64>(0)?),              // id
-                Value::String(r.get::<_,String>(1)?),  // guid
-                jnum(r.get::<_,i64>(2)?),              // mid
-                jnum(r.get::<_,i64>(3)?),              // mod
-                jnum(-1i64),                            // usn
-                Value::String(r.get::<_,String>(4)?),  // tags
-                Value::String(r.get::<_,String>(5)?),  // flds
-                Value::String(r.get::<_,String>(6)?),  // sfld
-                jnum(r.get::<_,i64>(7)?),              // csum
-                jnum(r.get::<_,i64>(8)?),              // flags
-                Value::String(r.get::<_,String>(9)?),  // data
+                jnum(r.get::<_,i64>(0)?),
+                Value::String(r.get::<_,String>(1)?),
+                jnum(r.get::<_,i64>(2)?),
+                jnum(r.get::<_,i64>(3)?),
+                jnum(-1i64),
+                Value::String(r.get::<_,String>(4)?),
+                Value::String(r.get::<_,String>(5)?),
+                Value::String(String::new()),           // sfld: always "" in v11
+                Value::String(String::new()),           // csum: always "" in v11
+                jnum(r.get::<_,i64>(6)?),
+                Value::String(r.get::<_,String>(7)?),
             ])
         })?.filter_map(|r| r.ok()).collect();
         rows
@@ -357,20 +403,18 @@ fn apply_server_chunk(conn: &Connection, chunk: Chunk) -> Result<()> {
     for row in &chunk.cards {
         if row.len() < 18 { continue; }
         let id = row[0].as_i64().unwrap_or(0);
-        // Skip cards we have locally modified (usn=-1) — our version wins.
         let local_usn: Option<i64> = conn
             .query_row("SELECT usn FROM cards WHERE id=?1", params![id], |r| r.get(0))
             .ok();
         if local_usn == Some(-1) { continue; }
-
         conn.execute(
             "INSERT OR REPLACE INTO cards \
              (id,nid,did,ord,mod,usn,type,queue,due,ivl,factor,reps,lapses,left,odue,odid,flags,data) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
             params![
-                row[0].as_i64(),  row[1].as_i64(),  row[2].as_i64(),  row[3].as_i64(),
-                row[4].as_i64(),  row[5].as_i64(),  row[6].as_i64(),  row[7].as_i64(),
-                row[8].as_i64(),  row[9].as_i64(),  row[10].as_i64(), row[11].as_i64(),
+                row[0].as_i64(), row[1].as_i64(), row[2].as_i64(), row[3].as_i64(),
+                row[4].as_i64(), row[5].as_i64(), row[6].as_i64(), row[7].as_i64(),
+                row[8].as_i64(), row[9].as_i64(), row[10].as_i64(), row[11].as_i64(),
                 row[12].as_i64(), row[13].as_i64(), row[14].as_i64(), row[15].as_i64(),
                 row[16].as_i64(), row[17].as_str().unwrap_or(""),
             ],
@@ -379,7 +423,6 @@ fn apply_server_chunk(conn: &Connection, chunk: Chunk) -> Result<()> {
 
     for row in &chunk.revlog {
         if row.len() < 9 { continue; }
-        // Revlog is append-only; ignore duplicates.
         let _ = conn.execute(
             "INSERT OR IGNORE INTO revlog (id,cid,usn,ease,ivl,lastIvl,factor,time,type) \
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
@@ -398,7 +441,8 @@ fn apply_server_chunk(conn: &Connection, chunk: Chunk) -> Result<()> {
             .query_row("SELECT usn FROM notes WHERE id=?1", params![id], |r| r.get(0))
             .ok();
         if local_usn == Some(-1) { continue; }
-
+        // v11: server sends sfld="" and csum="" (empty strings); client recomputes.
+        // csum has NOT NULL constraint so we store 0; Anki desktop fixes it on next open.
         conn.execute(
             "INSERT OR REPLACE INTO notes \
              (id,guid,mid,mod,usn,tags,flds,sfld,csum,flags,data) \
@@ -409,9 +453,10 @@ fn apply_server_chunk(conn: &Connection, chunk: Chunk) -> Result<()> {
                 row[2].as_i64(), row[3].as_i64(), row[4].as_i64(),
                 row[5].as_str().unwrap_or(""),
                 row[6].as_str().unwrap_or(""),
-                row[7].as_str().unwrap_or(""),
-                row[8].as_i64(), row[9].as_i64(),
-                row[10].as_str().unwrap_or(""),
+                row[7].as_str().unwrap_or(""),          // sfld: "" is fine
+                row[8].as_i64().unwrap_or(0),           // csum: "" → 0
+                row[9].as_i64().unwrap_or(0),           // flags
+                row[10].as_str().unwrap_or(""),         // data
             ],
         )?;
     }
