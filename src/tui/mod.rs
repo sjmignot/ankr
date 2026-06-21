@@ -18,11 +18,12 @@ use crate::models::*;
 use crate::scheduler::FsrsScheduler;
 use crate::review::ReviewQueue;
 use crate::ai::ClaudeClient;
-use screens::{AiCreateScreen, CreateScreen, DeckSelectScreen, DoneScreen, ReviewScreen};
+use screens::{AiCreateScreen, CreateScreen, DeckSelectScreen, DoneScreen, PoemCreateScreen, ReviewScreen};
 use screens::ai_create::{AiAction, AiState};
 use screens::deck_select::DeckAction;
 use screens::review::ReviewAction;
 use screens::create::CreateAction;
+use screens::poem_create::PoemCreateAction;
 
 pub struct AppConfig {
     pub db_path: PathBuf,
@@ -44,6 +45,7 @@ enum Screen {
     Done(DoneScreen),
     Create(CreateScreen),
     AiCreate(AiCreateScreen),
+    PoemCreate(PoemCreateScreen),
 }
 
 pub async fn run(db: DbConn, config: AppConfig) -> anyhow::Result<()> {
@@ -94,6 +96,7 @@ async fn run_app(
                 Screen::Done(s) => s.render(f, area),
                 Screen::Create(s) => s.render(f, area),
                 Screen::AiCreate(s) => s.render(f, area),
+                Screen::PoemCreate(s) => s.render(f, area),
             }
         })?;
 
@@ -112,43 +115,52 @@ async fn run_app(
 
         match &mut screen {
             // ── Deck Select ──────────────────────────────────────────────────
-            Screen::DeckSelect(s) => match s.handle_key(&key) {
-                DeckAction::Quit => break,
-                DeckAction::None => {}
-                DeckAction::Select => {
+            Screen::DeckSelect(s) => {
+                if key.code == KeyCode::Char('p') {
                     if let Some(deck) = s.selected_deck() {
-                        let deck_id = deck.id;
-                        let today = queries::today_day(crt);
-                        let now = queries::now_unix();
+                        let cloze_id = queries::get_cloze_notetype_id(&db.conn)?.unwrap_or(0);
+                        screen = Screen::PoemCreate(PoemCreateScreen::new(deck.id, cloze_id));
+                    }
+                    continue;
+                }
+                match s.handle_key(&key) {
+                    DeckAction::Quit => break,
+                    DeckAction::None => {}
+                    DeckAction::Select => {
+                        if let Some(deck) = s.selected_deck() {
+                            let deck_id = deck.id;
+                            let today = queries::today_day(crt);
+                            let now = queries::now_unix();
 
-                        let learning = queries::get_learning_cards(&db.conn, deck_id, now)?;
-                        let due = queries::get_due_cards(&db.conn, deck_id, today)?;
-                        let new = queries::get_new_cards(&db.conn, deck_id, config.new_limit as i64)?;
+                            let learning = queries::get_learning_cards(&db.conn, deck_id, now)?;
+                            let due = queries::get_due_cards(&db.conn, deck_id, today)?;
+                            let new = queries::get_new_cards(&db.conn, deck_id, config.new_limit as i64)?;
 
-                        let notetypes = queries::get_all_notetypes(&db.conn)?;
-                        let notetype_id = notetypes.first().map(|(id, _)| *id).unwrap_or(0);
+                            let notetypes = queries::get_all_notetypes(&db.conn)?;
+                            let notetype_id = notetypes.first().map(|(id, _)| *id).unwrap_or(0);
 
-                        let mut queue = ReviewQueue::new(learning, due, new, config.new_limit);
+                            let mut queue = ReviewQueue::new(learning, due, new, config.new_limit);
 
-                        if queue.total_remaining() == 0 {
-                            screen = Screen::Done(DoneScreen::new(SessionStats::default()));
-                            continue;
-                        }
+                            if queue.total_remaining() == 0 {
+                                screen = Screen::Done(DoneScreen::new(SessionStats::default()));
+                                continue;
+                            }
 
-                        if let Some(card) = queue.next() {
-                            let note = queries::get_resolved_note(&db.conn, &card)?;
-                            screen = Screen::Review {
-                                screen: ReviewScreen::new(card, note, config.media_dir.clone()),
-                                queue,
-                                scheduler: FsrsScheduler::new(0.9),
-                                crt,
-                                deck_id,
-                                notetype_id,
-                            };
+                            if let Some(card) = queue.next() {
+                                let note = queries::get_resolved_note(&db.conn, &card)?;
+                                screen = Screen::Review {
+                                    screen: ReviewScreen::new(card, note, config.media_dir.clone()),
+                                    queue,
+                                    scheduler: FsrsScheduler::new(0.9),
+                                    crt,
+                                    deck_id,
+                                    notetype_id,
+                                };
+                            }
                         }
                     }
                 }
-            },
+            }
 
             // ── Review ───────────────────────────────────────────────────────
             Screen::Review { screen: rev, queue, scheduler, crt: review_crt, deck_id, notetype_id } => {
@@ -161,6 +173,11 @@ async fn run_app(
                         }
                         KeyCode::Char('a') => {
                             screen = Screen::AiCreate(AiCreateScreen::new(*deck_id, *notetype_id));
+                            continue;
+                        }
+                        KeyCode::Char('p') => {
+                            let cloze_id = queries::get_cloze_notetype_id(&db.conn)?.unwrap_or(0);
+                            screen = Screen::PoemCreate(PoemCreateScreen::new(*deck_id, cloze_id));
                             continue;
                         }
                         _ => {}
@@ -261,6 +278,20 @@ async fn run_app(
                     if matches!(s.state, AiState::Done) {
                         screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
                     }
+                }
+            },
+
+            // ── Poem Create ───────────────────────────────────────────────────
+            Screen::PoemCreate(s) => match s.handle_key(key) {
+                PoemCreateAction::None => {}
+                PoemCreateAction::Cancel => {
+                    screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                }
+                PoemCreateAction::Save(card) => {
+                    if !config.readonly {
+                        queries::insert_note(&db.conn, &card)?;
+                    }
+                    screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
                 }
             },
         }

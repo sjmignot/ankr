@@ -317,7 +317,9 @@ impl ReviewScreen {
                 Span::styled("[c]", Style::default().fg(Color::Cyan)),
                 Span::raw(" Create  "),
                 Span::styled("[a]", Style::default().fg(Color::Cyan)),
-                Span::raw(" AI"),
+                Span::raw(" AI  "),
+                Span::styled("[p]", Style::default().fg(Color::Cyan)),
+                Span::raw(" Poem"),
             ]),
             Side::Answer(_) => Line::from(vec![
                 Span::styled("[1]", Style::default().fg(Color::Red)),
