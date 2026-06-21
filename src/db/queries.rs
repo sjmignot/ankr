@@ -46,6 +46,23 @@ pub fn get_decks(conn: &Connection) -> Result<Vec<Deck>> {
     Ok(decks)
 }
 
+/// Create a new normal deck and return its id.
+///
+/// Uses minimal protobuf blobs that Anki accepts for a default normal deck:
+/// - `kind`: DeckKind { normal: NormalDeck {} } → [0x0a, 0x00]
+/// - `common`: DeckCommon {} → [] (all fields default)
+pub fn create_deck(conn: &Connection, name: &str) -> Result<i64> {
+    let id = now_ms();
+    let kind: &[u8] = &[0x0a, 0x00];
+    let common: &[u8] = &[];
+    conn.execute(
+        "INSERT INTO decks (id, name, mtime_secs, usn, common, kind) \
+         VALUES (?1, ?2, ?3, -1, ?4, ?5)",
+        params![id, name, now_unix(), common, kind],
+    )?;
+    Ok(id)
+}
+
 pub fn get_due_counts(conn: &Connection, deck_id: i64, today: i64, now: i64) -> Result<(u32, u32, u32)> {
     let new: u32 = conn.query_row(
         "SELECT COUNT(*) FROM cards WHERE did=?1 AND queue=0",

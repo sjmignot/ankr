@@ -8,18 +8,22 @@ use ratatui::{
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use tui_textarea::TextArea;
 use crate::models::NewCard;
-use crate::render::poem::{GranularityMode, count_cloze_units, poem_to_cloze};
+use crate::render::poem::{GranularityMode, count_cards, poem_to_lpcg};
 
 pub enum PoemCreateAction {
     None,
-    Save(NewCard),
+    Save(Vec<NewCard>),
     Cancel,
 }
 
+#[derive(Clone, Copy, PartialEq)]
+enum PoemFocus { Poem, Author, Tags }
+
 pub struct PoemCreateScreen {
     poem_area: TextArea<'static>,
+    author_area: TextArea<'static>,
     tags_area: TextArea<'static>,
-    focus_tags: bool,
+    focus: PoemFocus,
     mode: GranularityMode,
     deck_id: i64,
     notetype_id: i64,
@@ -35,18 +39,27 @@ impl PoemCreateScreen {
         );
         poem_area.set_placeholder_text("Shall I compare thee to a summer's day?");
 
+        let mut author_area = TextArea::default();
+        author_area.set_block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Author "),
+        );
+        author_area.set_placeholder_text("Shakespeare");
+
         let mut tags_area = TextArea::default();
         tags_area.set_block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Title / tags (space-separated) "),
+                .title(" Tags (space-separated) "),
         );
-        tags_area.set_placeholder_text("shakespeare sonnets poem");
+        tags_area.set_placeholder_text("sonnets poem");
 
         Self {
             poem_area,
+            author_area,
             tags_area,
-            focus_tags: false,
+            focus: PoemFocus::Poem,
             mode: GranularityMode::Line,
             deck_id,
             notetype_id,
@@ -57,51 +70,76 @@ impl PoemCreateScreen {
         match key.code {
             KeyCode::Esc => return PoemCreateAction::Cancel,
             KeyCode::Tab => {
-                self.focus_tags = !self.focus_tags;
+                self.focus = match self.focus {
+                    PoemFocus::Poem => PoemFocus::Author,
+                    PoemFocus::Author => PoemFocus::Tags,
+                    PoemFocus::Tags => PoemFocus::Poem,
+                };
                 return PoemCreateAction::None;
             }
-            // Ctrl+Enter saves from anywhere
             KeyCode::Enter if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                return self.build_card();
+                return self.build_cards();
             }
-            // Plain Enter in tags field saves
-            KeyCode::Enter if self.focus_tags => {
-                return self.build_card();
+            KeyCode::Enter if self.focus == PoemFocus::Tags || self.focus == PoemFocus::Author => {
+                return self.build_cards();
             }
-            // [g] toggles granularity mode when not in tags
-            KeyCode::Char('g') if !self.focus_tags => {
+            KeyCode::Char('g') if self.focus == PoemFocus::Poem => {
                 self.mode = self.mode.toggle();
                 return PoemCreateAction::None;
             }
             _ => {}
         }
-        if self.focus_tags {
-            self.tags_area.input(key);
-        } else {
-            self.poem_area.input(key);
+        match self.focus {
+            PoemFocus::Poem => { self.poem_area.input(key); }
+            PoemFocus::Author => { self.author_area.input(key); }
+            PoemFocus::Tags => { self.tags_area.input(key); }
         }
         PoemCreateAction::None
     }
 
-    fn build_card(&self) -> PoemCreateAction {
+    pub fn handle_paste(&mut self, text: String) {
+        let area = match self.focus {
+            PoemFocus::Poem => &mut self.poem_area,
+            PoemFocus::Author => &mut self.author_area,
+            PoemFocus::Tags => &mut self.tags_area,
+        };
+        area.set_yank_text(&text);
+        area.paste();
+    }
+
+    fn build_cards(&self) -> PoemCreateAction {
         let raw = self.poem_area.lines().join("\n");
-        let raw = raw.trim();
+        let raw = raw.trim().to_string();
         if raw.is_empty() {
             return PoemCreateAction::Cancel;
         }
-        let text = poem_to_cloze(raw, self.mode);
-        let tags: Vec<String> = self.tags_area.lines()
-            .join(" ")
+
+        let author = self.author_area.lines().join("").trim().to_string();
+        let tag_text = self.tags_area.lines().join(" ");
+        let mut tags: Vec<String> = tag_text
             .split_whitespace()
             .map(|s| s.to_string())
             .collect();
-        PoemCreateAction::Save(NewCard {
-            text,
-            back: String::new(),
-            tags,
-            deck_id: self.deck_id,
-            notetype_id: self.notetype_id,
-        })
+        if !author.is_empty() {
+            // Prepend author as a tag (slugified: spaces → underscores)
+            let author_tag = author.replace(' ', "_");
+            tags.insert(0, format!("author:{author_tag}"));
+        }
+
+        let cards: Vec<NewCard> = poem_to_lpcg(&raw, self.mode)
+            .into_iter()
+            .map(|text| NewCard {
+                text,
+                back: String::new(),
+                tags: tags.clone(),
+                deck_id: self.deck_id,
+                notetype_id: self.notetype_id,
+            })
+            .collect();
+        if cards.is_empty() {
+            return PoemCreateAction::Cancel;
+        }
+        PoemCreateAction::Save(cards)
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
@@ -109,40 +147,39 @@ impl PoemCreateScreen {
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Length(2),  // hint bar
-                Constraint::Min(8),     // poem textarea
+                Constraint::Min(6),     // poem textarea
                 Constraint::Length(1),  // live preview
-                Constraint::Length(3),  // tags textarea
+                Constraint::Length(3),  // author
+                Constraint::Length(3),  // tags
                 Constraint::Length(2),  // footer
             ])
             .split(area);
 
-        let hint = Paragraph::new("Poem → Anki · Enter/Ctrl+Enter to save · Tab switch · g mode · Esc cancel")
+        let hint = Paragraph::new("Poem → Anki · Ctrl+Enter save · Tab cycle fields · g mode · Esc cancel")
             .style(Style::default().fg(Color::DarkGray));
         frame.render_widget(hint, chunks[0]);
 
-        // Highlight focused area border
-        let poem_style = if !self.focus_tags {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        };
-        let tags_style = if self.focus_tags {
-            Style::default().fg(Color::Yellow)
-        } else {
-            Style::default()
-        };
+        let focused_style = Style::default().fg(Color::Yellow);
+        let unfocused_style = Style::default();
+
         self.poem_area.set_block(
-            Block::default().borders(Borders::ALL).title(" Poem text ").border_style(poem_style),
+            Block::default().borders(Borders::ALL).title(" Poem text ")
+                .border_style(if self.focus == PoemFocus::Poem { focused_style } else { unfocused_style }),
+        );
+        self.author_area.set_block(
+            Block::default().borders(Borders::ALL).title(" Author ")
+                .border_style(if self.focus == PoemFocus::Author { focused_style } else { unfocused_style }),
         );
         self.tags_area.set_block(
-            Block::default().borders(Borders::ALL).title(" Title / tags ").border_style(tags_style),
+            Block::default().borders(Borders::ALL).title(" Tags ")
+                .border_style(if self.focus == PoemFocus::Tags { focused_style } else { unfocused_style }),
         );
 
         frame.render_widget(&self.poem_area, chunks[1]);
 
         // Live preview
         let raw = self.poem_area.lines().join("\n");
-        let count = count_cloze_units(raw.trim(), self.mode);
+        let count = count_cards(raw.trim(), self.mode);
         let preview_style = if count > 0 {
             Style::default().fg(Color::Green)
         } else {
@@ -156,18 +193,19 @@ impl PoemCreateScreen {
         .style(preview_style);
         frame.render_widget(preview, chunks[2]);
 
-        frame.render_widget(&self.tags_area, chunks[3]);
+        frame.render_widget(&self.author_area, chunks[3]);
+        frame.render_widget(&self.tags_area, chunks[4]);
 
         let footer = Paragraph::new(Line::from(vec![
-            Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+            Span::styled("[Ctrl+Enter]", Style::default().fg(Color::Yellow)),
             Span::raw(" Save  "),
             Span::styled("[Tab]", Style::default().fg(Color::Cyan)),
-            Span::raw(" Switch field  "),
+            Span::raw(" Cycle fields  "),
             Span::styled("[g]", Style::default().fg(Color::Green)),
             Span::raw(" Toggle mode  "),
             Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
             Span::raw(" Cancel"),
         ]));
-        frame.render_widget(footer, chunks[4]);
+        frame.render_widget(footer, chunks[5]);
     }
 }

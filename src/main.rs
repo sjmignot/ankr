@@ -11,6 +11,8 @@ mod tui;
 use clap::Parser;
 use cli::{Cli, Commands};
 use db::{DbConn, default_collection_path, media_dir, queries};
+use render::poem::{GranularityMode, poem_to_lpcg};
+use models::NewCard;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -50,6 +52,73 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:<40} {:>5} {:>5} {:>5}", deck.name, new, learning, review);
             }
         }
+        Some(Commands::Poem { file, deck, tags, stanza, dry_run }) => {
+            use std::io::IsTerminal;
+
+            // Find deck by substring match (needed for both TUI and CLI paths)
+            let decks = queries::get_decks(&db.conn)?;
+            let matched = decks.iter().find(|d| {
+                d.name.to_lowercase().contains(&deck.to_lowercase())
+            });
+            let deck_entry = match matched {
+                Some(d) => d.clone(),
+                None => {
+                    let id = queries::create_deck(&db.conn, &deck)?;
+                    eprintln!("Created deck \"{}\".", deck);
+                    models::Deck { id, name: deck.clone() }
+                }
+            };
+            let notetype_id = queries::get_cloze_notetype_id(&db.conn)?
+                .ok_or_else(|| anyhow::anyhow!("No cloze notetype found in collection."))?;
+
+            // No file and stdin is a terminal → open TUI poem screen
+            if file.is_none() && std::io::stdin().is_terminal() {
+                tui::run_poem(db, deck_entry.id, notetype_id).await?;
+                return Ok(());
+            }
+
+            let text = match file {
+                Some(path) => std::fs::read_to_string(&path)
+                    .map_err(|e| anyhow::anyhow!("Could not read {}: {e}", path.display()))?,
+                None => {
+                    let mut buf = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)?;
+                    buf
+                }
+            };
+
+            let text = text.trim().to_string();
+            if text.is_empty() {
+                anyhow::bail!("No poem text provided.");
+            }
+
+            let mode = if stanza { GranularityMode::Stanza } else { GranularityMode::Line };
+            let tag_list: Vec<String> = tags.split_whitespace().map(|s| s.to_string()).collect();
+
+            let cards: Vec<NewCard> = poem_to_lpcg(&text, mode)
+                .into_iter()
+                .map(|card_text| NewCard {
+                    text: card_text,
+                    back: String::new(),
+                    tags: tag_list.clone(),
+                    deck_id: deck_entry.id,
+                    notetype_id,
+                })
+                .collect();
+
+            if dry_run {
+                for (i, card) in cards.iter().enumerate() {
+                    println!("--- Card {} ---\n{}\n", i + 1, card.text);
+                }
+                println!("({} cards, dry run — nothing written)", cards.len());
+            } else {
+                for card in &cards {
+                    queries::insert_note(&db.conn, card)?;
+                }
+                println!("Created {} cards in \"{}\".", cards.len(), deck_entry.name);
+            }
+        }
+
         None => {
             let config = tui::AppConfig {
                 db_path: db_path.clone(),

@@ -28,4 +28,26 @@ pub struct Cli {
 pub enum Commands {
     /// Print due card counts per deck and exit
     Stats,
+
+    /// Create Anki cards from a poem using the LPCG method
+    Poem {
+        /// Poem text file (reads from stdin if omitted)
+        file: Option<PathBuf>,
+
+        /// Deck name (substring match, case-insensitive)
+        #[arg(short, long, default_value = "Poetry")]
+        deck: String,
+
+        /// Tags to apply (space-separated)
+        #[arg(short, long, default_value = "")]
+        tags: String,
+
+        /// Use stanza mode instead of line mode
+        #[arg(long)]
+        stanza: bool,
+
+        /// Print cards without writing to the database
+        #[arg(long)]
+        dry_run: bool,
+    },
 }

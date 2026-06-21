@@ -5,7 +5,10 @@ use std::io;
 use std::path::PathBuf;
 use std::time::Duration;
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, KeyCode},
+    event::{
+        DisableBracketedPaste, DisableMouseCapture,
+        EnableBracketedPaste, EnableMouseCapture, KeyCode,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, enable_raw_mode, disable_raw_mode},
 };
@@ -48,17 +51,80 @@ enum Screen {
     PoemCreate(PoemCreateScreen),
 }
 
+/// Run just the poem creation screen, then exit. Used by `ankr poem` with no input.
+pub async fn run_poem(db: DbConn, deck_id: i64, notetype_id: i64) -> anyhow::Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = run_poem_app(&mut terminal, &db, deck_id, notetype_id).await;
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
+    terminal.show_cursor()?;
+    result
+}
+
+async fn run_poem_app(
+    terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
+    db: &DbConn,
+    deck_id: i64,
+    notetype_id: i64,
+) -> anyhow::Result<()> {
+    let mut screen = PoemCreateScreen::new(deck_id, notetype_id);
+    loop {
+        terminal.draw(|f| screen.render(f, f.area()))?;
+
+        let maybe_event = tokio::task::spawn_blocking(|| {
+            if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                crossterm::event::read().ok()
+            } else {
+                None
+            }
+        })
+        .await?;
+
+        let Some(event) = maybe_event else { continue };
+
+        let action = match event {
+            crossterm::event::Event::Paste(text) => {
+                screen.handle_paste(text);
+                PoemCreateAction::None
+            }
+            crossterm::event::Event::Key(key) => screen.handle_key(key),
+            _ => PoemCreateAction::None,
+        };
+
+        match action {
+            PoemCreateAction::None => {}
+            PoemCreateAction::Cancel => break,
+            PoemCreateAction::Save(cards) => {
+                let n = cards.len();
+                for card in &cards {
+                    queries::insert_note(&db.conn, card)?;
+                }
+                drop(screen);
+                eprintln!("Created {n} cards.");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn run(db: DbConn, config: AppConfig) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
     let result = run_app(&mut terminal, db, config).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture)?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
     terminal.show_cursor()?;
 
     result
@@ -101,17 +167,29 @@ async fn run_app(
         })?;
 
         // Poll event (100ms so spinner animates)
-        let maybe_key = tokio::task::spawn_blocking(|| {
+        let maybe_event = tokio::task::spawn_blocking(|| {
             if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
-                crossterm::event::read().ok().and_then(|e| {
-                    if let crossterm::event::Event::Key(k) = e { Some(k) } else { None }
-                })
+                crossterm::event::read().ok()
             } else {
                 None
             }
         }).await?;
 
-        let Some(key) = maybe_key else { continue };
+        let Some(event) = maybe_event else { continue };
+
+        // Handle paste for the poem screen before key dispatch
+        if let crossterm::event::Event::Paste(ref text) = event {
+            if let Screen::PoemCreate(ref mut s) = screen {
+                s.handle_paste(text.clone());
+            }
+            continue;
+        }
+
+        // All other screens only use key events
+        let key = match event {
+            crossterm::event::Event::Key(k) => k,
+            _ => continue,
+        };
 
         match &mut screen {
             // ── Deck Select ──────────────────────────────────────────────────
@@ -287,9 +365,11 @@ async fn run_app(
                 PoemCreateAction::Cancel => {
                     screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
                 }
-                PoemCreateAction::Save(card) => {
+                PoemCreateAction::Save(cards) => {
                     if !config.readonly {
-                        queries::insert_note(&db.conn, &card)?;
+                        for card in &cards {
+                            queries::insert_note(&db.conn, card)?;
+                        }
                     }
                     screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
                 }
