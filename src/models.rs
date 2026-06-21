@@ -100,6 +100,8 @@ pub struct FieldDef {
 pub struct Template {
     pub ord: i32,
     pub name: String,
+    pub qfmt: String,
+    pub afmt: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

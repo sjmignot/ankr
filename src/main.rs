@@ -6,6 +6,7 @@ mod models;
 mod render;
 mod review;
 mod scheduler;
+mod sync;
 mod tui;
 
 use clap::Parser;
@@ -52,6 +53,46 @@ async fn main() -> anyhow::Result<()> {
                 println!("{:<40} {:>5} {:>5} {:>5}", deck.name, new, learning, review);
             }
         }
+        Some(Commands::Sync { username, password }) => {
+            // Prompt for credentials if not provided via flag or env var.
+            let username = match username {
+                Some(u) => u,
+                None => {
+                    eprint!("AnkiWeb email: ");
+                    let mut s = String::new();
+                    std::io::stdin().read_line(&mut s)?;
+                    s.trim().to_string()
+                }
+            };
+            let password = match password {
+                Some(p) => p,
+                None => {
+                    eprint!("AnkiWeb password: ");
+                    // Read without echo if possible, fall back to plain read.
+                    match rpassword::read_password() {
+                        Ok(p) => p,
+                        Err(_) => {
+                            let mut s = String::new();
+                            std::io::stdin().read_line(&mut s)?;
+                            s.trim().to_string()
+                        }
+                    }
+                }
+            };
+
+            eprintln!("Logging in to AnkiWeb…");
+            let client = sync::SyncClient::login(&username, &password).await?;
+            eprintln!("Syncing…");
+            let summary = client.sync(&db.conn).await?;
+            println!(
+                "Sync complete — pushed {} card(s), {} revlog(s), {} note(s); pulled {} card(s) from server.",
+                summary.pushed_cards, summary.pushed_revlog, summary.pushed_notes, summary.pulled_cards,
+            );
+            if !summary.server_msg.is_empty() {
+                println!("Server message: {}", summary.server_msg);
+            }
+        }
+
         Some(Commands::Poem { file, deck, tags, stanza, dry_run }) => {
             use std::io::IsTerminal;
 

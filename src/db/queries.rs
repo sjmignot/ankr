@@ -162,9 +162,11 @@ pub fn get_notetype(conn: &Connection, mid: i64) -> Result<NoteType> {
     .collect();
 
     let mut tmpl_stmt = conn.prepare(
-        "SELECT ord, name FROM templates WHERE ntid=?1 ORDER BY ord")?;
+        "SELECT ord, name, config FROM templates WHERE ntid=?1 ORDER BY ord")?;
     let templates: Vec<Template> = tmpl_stmt.query_map(params![mid], |row| {
-        Ok(Template { ord: row.get(0)?, name: row.get(1)? })
+        let config: Vec<u8> = row.get(2)?;
+        let (qfmt, afmt) = decode_template_config(&config);
+        Ok(Template { ord: row.get(0)?, name: row.get(1)?, qfmt, afmt })
     })?
     .filter_map(|r| r.ok())
     .collect();
@@ -206,6 +208,12 @@ pub fn get_cloze_notetype_id(conn: &Connection) -> Result<Option<i64>> {
 
 // ── Write review ──────────────────────────────────────────────────────────────
 
+/// Stamp col.mod so Anki detects external changes and triggers auto-sync on next open.
+fn touch_col(conn: &Connection) -> Result<()> {
+    conn.execute("UPDATE col SET mod=?1", params![now_unix()])?;
+    Ok(())
+}
+
 pub fn write_review(conn: &Connection, result: &ReviewResult, crt: i64) -> Result<()> {
     let s = &result.new_state;
     let today = today_day(crt);
@@ -231,6 +239,7 @@ pub fn write_review(conn: &Connection, result: &ReviewResult, crt: i64) -> Resul
         ],
     )?;
 
+    touch_col(conn)?;
     Ok(())
 }
 
@@ -271,6 +280,7 @@ pub fn insert_note(conn: &Connection, note: &NewCard) -> Result<i64> {
         }
     }
 
+    touch_col(conn)?;
     Ok(nid)
 }
 
@@ -283,6 +293,49 @@ fn insert_card(conn: &Connection, nid: i64, did: i64, ord: i32, now: i64) -> Res
         params![id, nid, did, ord, now],
     )?;
     Ok(())
+}
+
+/// Minimal protobuf varint decoder. Returns (value, bytes_consumed).
+fn read_varint(buf: &[u8]) -> (u64, usize) {
+    let mut result: u64 = 0;
+    let mut shift = 0u32;
+    for (i, &byte) in buf.iter().enumerate() {
+        result |= ((byte & 0x7F) as u64) << shift;
+        shift += 7;
+        if byte & 0x80 == 0 {
+            return (result, i + 1);
+        }
+    }
+    (result, buf.len())
+}
+
+/// Decode Anki's CardTemplateConfig protobuf blob into (qfmt, afmt).
+/// Field 1 = qfmt (question template), field 2 = afmt (answer template).
+fn decode_template_config(blob: &[u8]) -> (String, String) {
+    let mut qfmt = String::new();
+    let mut afmt = String::new();
+    let mut i = 0;
+    while i < blob.len() {
+        let (tag, c) = read_varint(&blob[i..]);
+        i += c;
+        let wire = tag & 0x7;
+        let field = tag >> 3;
+        match wire {
+            0 => { let (_, c) = read_varint(&blob[i..]); i += c; }
+            1 => { i += 8; }
+            2 => {
+                let (len, c) = read_varint(&blob[i..]);
+                i += c;
+                let end = (i + len as usize).min(blob.len());
+                let s = String::from_utf8_lossy(&blob[i..end]).into_owned();
+                match field { 1 => qfmt = s, 2 => afmt = s, _ => {} }
+                i = end;
+            }
+            5 => { i += 4; }
+            _ => break,
+        }
+    }
+    (qfmt, afmt)
 }
 
 fn extract_cloze_ords(text: &str) -> Vec<u32> {

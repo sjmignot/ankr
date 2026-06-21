@@ -29,6 +29,17 @@ pub enum Commands {
     /// Print due card counts per deck and exit
     Stats,
 
+    /// Sync the collection with AnkiWeb (no Anki desktop needed)
+    Sync {
+        /// AnkiWeb username / email (or set ANKIWEB_USER env var)
+        #[arg(short, long, env = "ANKIWEB_USER")]
+        username: Option<String>,
+
+        /// AnkiWeb password (or set ANKIWEB_PASS env var)
+        #[arg(short, long, env = "ANKIWEB_PASS")]
+        password: Option<String>,
+    },
+
     /// Create Anki cards from a poem using the LPCG method
     Poem {
         /// Poem text file (reads from stdin if omitted)

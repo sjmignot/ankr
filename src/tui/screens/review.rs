@@ -112,10 +112,114 @@ impl ReviewScreen {
         ReviewAction::Rated(rating, ms)
     }
 
+    /// Returns the active template for this card (matched by ord).
+    fn active_template(&self) -> Option<&crate::models::Template> {
+        self.note.notetype.templates
+            .iter()
+            .find(|t| t.ord == self.card.ord as i32)
+    }
+
+    /// Render an Anki template string with field substitution and conditional blocks.
+    ///
+    /// Handles:
+    /// - `{{FieldName}}` → field value
+    /// - `{{#FieldName}}...{{/FieldName}}` → show block if field non-empty
+    /// - `{{^FieldName}}...{{/FieldName}}` → show block if field empty
+    /// - `{{hint:FieldName}}` → field value (hint UI stripped)
+    /// - `{{type:FieldName}}` → field value (type-answer stripped)
+    fn fill_template(fmt: &str, fields: &[(String, String)]) -> String {
+        let map: std::collections::HashMap<&str, &str> =
+            fields.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+        Self::render_block(fmt, &map)
+    }
+
+    fn render_block(s: &str, fields: &std::collections::HashMap<&str, &str>) -> String {
+        let mut out = String::new();
+        let mut rest = s;
+        while let Some(open) = rest.find("{{") {
+            out.push_str(&rest[..open]);
+            rest = &rest[open..];
+            let Some(close) = rest.find("}}") else {
+                out.push_str(rest);
+                return out;
+            };
+            let tag = &rest[2..close];
+            rest = &rest[close + 2..];
+
+            if let Some(field_name) = tag.strip_prefix('#') {
+                // {{#Field}}...{{/Field}} — show if non-empty
+                let closing = format!("{{{{/{field_name}}}}}");
+                if let Some(end) = rest.find(closing.as_str()) {
+                    let inner = &rest[..end];
+                    rest = &rest[end + closing.len()..];
+                    if !fields.get(field_name).unwrap_or(&"").is_empty() {
+                        out.push_str(&Self::render_block(inner, fields));
+                    }
+                }
+            } else if let Some(field_name) = tag.strip_prefix('^') {
+                // {{^Field}}...{{/Field}} — show if empty
+                let closing = format!("{{{{/{field_name}}}}}");
+                if let Some(end) = rest.find(closing.as_str()) {
+                    let inner = &rest[..end];
+                    rest = &rest[end + closing.len()..];
+                    if fields.get(field_name).unwrap_or(&"").is_empty() {
+                        out.push_str(&Self::render_block(inner, fields));
+                    }
+                }
+            } else if tag.starts_with('/') {
+                // Stray closing tag — ignore
+            } else {
+                // Simple field: strip hint:/type: prefixes
+                let name = tag
+                    .strip_prefix("hint:")
+                    .or_else(|| tag.strip_prefix("type:"))
+                    .unwrap_or(tag)
+                    .trim();
+                if let Some(val) = fields.get(name) {
+                    out.push_str(val);
+                }
+                // Unknown fields produce nothing (same as Anki behaviour)
+            }
+        }
+        out.push_str(rest);
+        out
+    }
+
+    /// HTML for the question side: rendered from `qfmt` for standard cards.
+    fn question_html(&self) -> String {
+        match self.note.notetype.kind {
+            NoteKind::Cloze => self.note.first_field().to_string(),
+            NoteKind::Standard => match self.active_template() {
+                Some(t) => Self::fill_template(&t.qfmt, &self.note.fields),
+                None => self.note.first_field().to_string(),
+            },
+        }
+    }
+
+    /// HTML for the answer side: rendered from `afmt` (with FrontSide resolved).
+    fn answer_html(&self) -> String {
+        match self.note.notetype.kind {
+            NoteKind::Cloze => self.note.first_field().to_string(),
+            NoteKind::Standard => match self.active_template() {
+                Some(t) => {
+                    let front = Self::fill_template(&t.qfmt, &self.note.fields);
+                    let back = t.afmt.replace("{{FrontSide}}", &front);
+                    Self::fill_template(&back, &self.note.fields)
+                }
+                None => self.note.fields.iter()
+                    .map(|(_, v)| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            },
+        }
+    }
+
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {
-        let srcs: Vec<String> = self.note.fields.iter()
-            .flat_map(|(_, v)| img_render::extract_srcs(v))
-            .collect();
+        let side_html = match &self.side {
+            Side::Question => self.question_html(),
+            Side::Answer(_) => self.answer_html(),
+        };
+        let (_, srcs) = html::extract(&side_html);
         let has_image = !srcs.is_empty();
         let is_question = matches!(&self.side, Side::Question);
         let answer_h = if is_question { 3u16 } else { 0 };
@@ -258,16 +362,25 @@ impl ReviewScreen {
             }
             NoteKind::Standard => match &self.side {
                 Side::Question => {
-                    let (plain, _) = html::extract(self.note.first_field());
+                    let (plain, _) = html::extract(&self.question_html());
                     plain.lines().map(|l| Line::from(l.to_string())).collect()
                 }
                 Side::Answer(typed) => {
                     let mut lines: Vec<Line<'static>> = Vec::new();
+                    // Typed answer comparison against the rendered answer text.
                     if !typed.is_empty() {
-                        let correct_html = self.note.fields.get(1)
-                            .map(|(_, v)| v.as_str())
-                            .unwrap_or("");
-                        let (correct, _) = html::extract(correct_html);
+                        let (answer_text, _) = html::extract(&self.answer_html());
+                        // Strip FrontSide content from comparison — use first non-empty line
+                        // of answer that differs from the question.
+                        let (question_text, _) = html::extract(&self.question_html());
+                        let correct = answer_text
+                            .lines()
+                            .find(|l| {
+                                let l = l.trim();
+                                !l.is_empty() && !question_text.contains(l)
+                            })
+                            .unwrap_or(answer_text.lines().next().unwrap_or(""))
+                            .to_string();
                         lines.extend(comparison_lines(typed, &correct));
                         lines.push(Line::from(Span::styled(
                             "— — —",
