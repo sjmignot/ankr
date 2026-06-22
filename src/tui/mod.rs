@@ -43,6 +43,7 @@ enum Screen {
         scheduler: FsrsScheduler,
         crt: i64,
         deck_id: i64,
+        deck_name: String,
         notetype_id: i64,
     },
     Done(DoneScreen),
@@ -52,14 +53,14 @@ enum Screen {
 }
 
 /// Run just the poem creation screen, then exit. Used by `ankr poem` with no input.
-pub async fn run_poem(db: DbConn, deck_id: i64, notetype_id: i64) -> anyhow::Result<()> {
+pub async fn run_poem(db: DbConn, deck_name: String, deck_id: i64, notetype_id: i64) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_poem_app(&mut terminal, &db, deck_id, notetype_id).await;
+    let result = run_poem_app(&mut terminal, &db, deck_name, deck_id, notetype_id).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
@@ -70,10 +71,11 @@ pub async fn run_poem(db: DbConn, deck_id: i64, notetype_id: i64) -> anyhow::Res
 async fn run_poem_app(
     terminal: &mut ratatui::Terminal<CrosstermBackend<io::Stdout>>,
     db: &DbConn,
+    deck_name: String,
     deck_id: i64,
     notetype_id: i64,
 ) -> anyhow::Result<()> {
-    let mut screen = PoemCreateScreen::new(deck_id, notetype_id);
+    let mut screen = PoemCreateScreen::new(deck_name, deck_id, notetype_id);
     loop {
         terminal.draw(|f| screen.render(f, f.area()))?;
 
@@ -100,13 +102,15 @@ async fn run_poem_app(
         match action {
             PoemCreateAction::None => {}
             PoemCreateAction::Cancel => break,
-            PoemCreateAction::Save(cards) => {
+            PoemCreateAction::Save { cards, subdeck_path } => {
+                let did = queries::get_or_create_deck_path(&db.conn, &subdeck_path)?;
                 let n = cards.len();
-                for card in &cards {
-                    queries::insert_note(&db.conn, card)?;
+                for mut card in cards {
+                    card.deck_id = did;
+                    queries::insert_note(&db.conn, &card)?;
                 }
                 drop(screen);
-                eprintln!("Created {n} cards.");
+                eprintln!("Created {n} cards in \"{subdeck_path}\".");
                 break;
             }
         }
@@ -197,7 +201,7 @@ async fn run_app(
                 if key.code == KeyCode::Char('p') {
                     if let Some(deck) = s.selected_deck() {
                         let cloze_id = queries::get_cloze_notetype_id(&db.conn)?.unwrap_or(0);
-                        screen = Screen::PoemCreate(PoemCreateScreen::new(deck.id, cloze_id));
+                        screen = Screen::PoemCreate(PoemCreateScreen::new(deck.name.clone(), deck.id, cloze_id));
                     }
                     continue;
                 }
@@ -207,6 +211,7 @@ async fn run_app(
                     DeckAction::Select => {
                         if let Some(deck) = s.selected_deck() {
                             let deck_id = deck.id;
+                            let deck_name = deck.name.clone();
                             let today = queries::today_day(crt);
                             let now = queries::now_unix();
 
@@ -232,6 +237,7 @@ async fn run_app(
                                     scheduler: FsrsScheduler::new(0.9),
                                     crt,
                                     deck_id,
+                                    deck_name,
                                     notetype_id,
                                 };
                             }
@@ -241,7 +247,7 @@ async fn run_app(
             }
 
             // ── Review ───────────────────────────────────────────────────────
-            Screen::Review { screen: rev, queue, scheduler, crt: review_crt, deck_id, notetype_id } => {
+            Screen::Review { screen: rev, queue, scheduler, crt: review_crt, deck_id, deck_name, notetype_id } => {
                 // Only intercept [c]/[a] when not actively typing an answer.
                 if !rev.is_typing() {
                     match key.code {
@@ -255,7 +261,7 @@ async fn run_app(
                         }
                         KeyCode::Char('p') => {
                             let cloze_id = queries::get_cloze_notetype_id(&db.conn)?.unwrap_or(0);
-                            screen = Screen::PoemCreate(PoemCreateScreen::new(*deck_id, cloze_id));
+                            screen = Screen::PoemCreate(PoemCreateScreen::new(deck_name.clone(), *deck_id, cloze_id));
                             continue;
                         }
                         _ => {}
@@ -365,10 +371,12 @@ async fn run_app(
                 PoemCreateAction::Cancel => {
                     screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
                 }
-                PoemCreateAction::Save(cards) => {
+                PoemCreateAction::Save { cards, subdeck_path } => {
                     if !config.readonly {
-                        for card in &cards {
-                            queries::insert_note(&db.conn, card)?;
+                        let did = queries::get_or_create_deck_path(&db.conn, &subdeck_path)?;
+                        for mut card in cards {
+                            card.deck_id = did;
+                            queries::insert_note(&db.conn, &card)?;
                         }
                     }
                     screen = Screen::DeckSelect(build_deck_select(&db, crt)?);

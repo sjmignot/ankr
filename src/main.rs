@@ -1,5 +1,6 @@
 mod ai;
 mod cli;
+mod config;
 mod db;
 mod error;
 mod models;
@@ -54,31 +55,57 @@ async fn main() -> anyhow::Result<()> {
             }
         }
         Some(Commands::Sync { username, password }) => {
-            // Prompt for credentials if not provided via flag or env var.
+            let cfg = config::load();
+
+            // Resolve username: flag > env > config file > prompt.
             let username = match username {
                 Some(u) => u,
-                None => {
-                    eprint!("AnkiWeb email: ");
-                    let mut s = String::new();
-                    std::io::stdin().read_line(&mut s)?;
-                    s.trim().to_string()
-                }
+                None => match cfg.sync.username.clone() {
+                    Some(u) => u,
+                    None => {
+                        eprint!("AnkiWeb email: ");
+                        let mut s = String::new();
+                        std::io::stdin().read_line(&mut s)?;
+                        s.trim().to_string()
+                    }
+                },
             };
+
+            // Resolve password: flag > env > config file > prompt.
             let password = match password {
                 Some(p) => p,
-                None => {
-                    eprint!("AnkiWeb password: ");
-                    // Read without echo if possible, fall back to plain read.
-                    match rpassword::read_password() {
-                        Ok(p) => p,
-                        Err(_) => {
-                            let mut s = String::new();
-                            std::io::stdin().read_line(&mut s)?;
-                            s.trim().to_string()
+                None => match cfg.sync.password.clone() {
+                    Some(p) => p,
+                    None => {
+                        eprint!("AnkiWeb password: ");
+                        match rpassword::read_password() {
+                            Ok(p) => p,
+                            Err(_) => {
+                                let mut s = String::new();
+                                std::io::stdin().read_line(&mut s)?;
+                                s.trim().to_string()
+                            }
                         }
                     }
-                }
+                },
             };
+
+            // Offer to save credentials if they weren't already in the config.
+            if cfg.sync.username.is_none() || cfg.sync.password.is_none() {
+                eprint!("Save credentials to {}? [y/N] ", config::config_path().display());
+                let mut ans = String::new();
+                std::io::stdin().read_line(&mut ans)?;
+                if ans.trim().eq_ignore_ascii_case("y") {
+                    let new_cfg = config::Config {
+                        sync: config::SyncConfig {
+                            username: Some(username.clone()),
+                            password: Some(password.clone()),
+                        },
+                    };
+                    config::save(&new_cfg)?;
+                    eprintln!("Credentials saved.");
+                }
+            }
 
             eprintln!("Logging in to AnkiWeb…");
             let client = sync::SyncClient::login(&username, &password).await?;
@@ -104,7 +131,7 @@ async fn main() -> anyhow::Result<()> {
             let deck_entry = match matched {
                 Some(d) => d.clone(),
                 None => {
-                    let id = queries::create_deck(&db.conn, &deck)?;
+                    let id = queries::get_or_create_deck_path(&db.conn, &deck)?;
                     eprintln!("Created deck \"{}\".", deck);
                     models::Deck { id, name: deck.clone() }
                 }
@@ -114,7 +141,7 @@ async fn main() -> anyhow::Result<()> {
 
             // No file and stdin is a terminal → open TUI poem screen
             if file.is_none() && std::io::stdin().is_terminal() {
-                tui::run_poem(db, deck_entry.id, notetype_id).await?;
+                tui::run_poem(db, deck_entry.name.clone(), deck_entry.id, notetype_id).await?;
                 return Ok(());
             }
 

@@ -12,7 +12,7 @@ use crate::render::poem::{GranularityMode, count_cards, poem_to_lpcg};
 
 pub enum PoemCreateAction {
     None,
-    Save(Vec<NewCard>),
+    Save { cards: Vec<NewCard>, subdeck_path: String },
     Cancel,
 }
 
@@ -27,11 +27,12 @@ pub struct PoemCreateScreen {
     focus: PoemFocus,
     mode: GranularityMode,
     deck_id: i64,
+    parent_deck_name: String,
     notetype_id: i64,
 }
 
 impl PoemCreateScreen {
-    pub fn new(deck_id: i64, notetype_id: i64) -> Self {
+    pub fn new(parent_deck_name: String, deck_id: i64, notetype_id: i64) -> Self {
         let mut poem_area = TextArea::default();
         poem_area.set_block(Block::default().borders(Borders::ALL).title(" Poem text "));
         poem_area.set_placeholder_text("Shall I compare thee to a summer's day?");
@@ -56,6 +57,7 @@ impl PoemCreateScreen {
             focus: PoemFocus::Poem,
             mode: GranularityMode::Line,
             deck_id,
+            parent_deck_name,
             notetype_id,
         }
     }
@@ -134,20 +136,25 @@ impl PoemCreateScreen {
             tags.insert(0, format!("title:{}", title.replace(' ', "_")));
         }
 
+        // Build subdeck path: Parent > Author > Title (omit empty components).
+        let mut path = self.parent_deck_name.clone();
+        if !author.is_empty() { path = format!("{}::{}", path, author); }
+        if !title.is_empty()  { path = format!("{}::{}", path, title); }
+
         let cards: Vec<NewCard> = poem_to_lpcg(&raw, self.mode)
             .into_iter()
             .map(|text| NewCard {
                 text,
                 back: String::new(),
                 tags: tags.clone(),
-                deck_id: self.deck_id,
+                deck_id: self.deck_id,   // placeholder; caller remaps via subdeck_path
                 notetype_id: self.notetype_id,
             })
             .collect();
         if cards.is_empty() {
             return PoemCreateAction::Cancel;
         }
-        PoemCreateAction::Save(cards)
+        PoemCreateAction::Save { cards, subdeck_path: path }
     }
 
     pub fn render(&mut self, frame: &mut Frame, area: Rect) {

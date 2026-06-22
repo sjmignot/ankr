@@ -253,15 +253,27 @@ pub fn write_review(conn: &Connection, result: &ReviewResult, crt: i64) -> Resul
     let s = &result.new_state;
     let today = today_day(crt);
     let due = today + s.due_days;
+    let now = now_unix();
 
-    let fsrs_json = serde_json::json!({ "s": s.stability, "d": s.difficulty }).to_string();
+    // Merge into existing data: preserve Anki's `pos` field and add `lrt`
+    // (last-review-time, Unix seconds) which Anki requires. Also carry our
+    // FSRS state under `s`/`d` for scheduling on subsequent reviews.
+    let existing: String = conn
+        .query_row("SELECT data FROM cards WHERE id=?1", params![result.card_id], |r| r.get(0))
+        .unwrap_or_default();
+    let mut data: serde_json::Value =
+        serde_json::from_str(&existing).unwrap_or(serde_json::json!({}));
+    data["lrt"] = serde_json::json!(now);
+    data["s"] = serde_json::json!(s.stability);
+    data["d"] = serde_json::json!(s.difficulty);
+    let data_str = data.to_string();
 
     conn.execute(
         "UPDATE cards SET type=?1, queue=?2, due=?3, ivl=?4, factor=?5, \
          reps=?6, lapses=?7, mod=?8, usn=-1, data=?9 WHERE id=?10",
         params![
             s.card_type, s.queue, due, s.interval, s.factor,
-            s.new_reps, s.new_lapses, now_unix(), fsrs_json, result.card_id,
+            s.new_reps, s.new_lapses, now, data_str, result.card_id,
         ],
     )?;
 
