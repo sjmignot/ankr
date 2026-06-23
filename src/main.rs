@@ -49,7 +49,7 @@ async fn main() -> anyhow::Result<()> {
             println!("{:<40} {:>5} {:>5} {:>5}", "Deck", "New", "Lrn", "Rev");
             println!("{}", "-".repeat(57));
             for deck in &decks {
-                let (new, learning, review) = queries::get_due_counts(&db.conn, deck.id, today, now)
+                let (new, learning, review) = queries::get_due_counts(&db.conn, deck.id, today, now, crt, cli.review_limit)
                     .unwrap_or((0, 0, 0));
                 println!("{:<40} {:>5} {:>5} {:>5}", deck.name, new, learning, review);
             }
@@ -192,6 +192,7 @@ async fn main() -> anyhow::Result<()> {
                 db_path: db_path.clone(),
                 media_dir: media,
                 new_limit: cli.new_limit,
+                review_limit: cli.review_limit,
                 readonly: cli.readonly,
             };
             tui::run(db, config).await?;

@@ -1,7 +1,7 @@
 use chrono::Utc;
 use rs_fsrs::{BasicScheduler, Card as FsrsCard, ImplScheduler, Parameters, Rating as FsrsRating, State};
 use crate::models::*;
-use crate::db::queries::{now_unix, today_day};
+use crate::db::queries::today_day;
 
 pub struct FsrsScheduler {
     pub params: Parameters,
@@ -24,7 +24,7 @@ impl FsrsScheduler {
         let info = scheduler.review(fsrs_rating);
         let next = info.card;
 
-        let today = today_day(crt);
+        let _today = today_day(crt);
         let due_days = (next.due - now).num_days().max(0);
         let scheduled_days = next.scheduled_days.max(0);
 
@@ -41,12 +41,17 @@ impl FsrsScheduler {
             card.lapses
         };
 
-        let was_new = card.card_type == CardType::New;
         let new_reps = card.reps + 1;
 
-        // factor: store stability * 1000 as an integer (Anki uses ease * 1000, ~2500 default)
-        // We repurpose factor to carry stability for FSRS.
-        let factor = (next.stability * 1000.0) as i64;
+        // Preserve the card's existing ease factor. Anki with FSRS keeps a
+        // traditional ease factor (1300–9999) in this column; FSRS state
+        // (stability, difficulty) lives only in cards.data. Writing stability*1000
+        // here causes the sync server to reject the chunk with HTTP 400.
+        let factor = if card.factor >= 1300 && card.factor <= 9999 {
+            card.factor
+        } else {
+            2500 // reset any previously-corrupted value
+        };
 
         CardState {
             stability: next.stability as f32,
@@ -57,19 +62,32 @@ impl FsrsScheduler {
             new_lapses,
             card_type: new_type,
             queue: new_queue,
-            factor: factor.max(1300), // Anki minimum
+            factor,
         }
     }
 
     fn card_to_fsrs(&self, card: &Card) -> FsrsCard {
         // Parse FSRS state from card.data JSON: {"s": stability, "d": difficulty}
-        let (stability, difficulty) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&card.data) {
+        let (mut stability, mut difficulty) = if let Ok(v) = serde_json::from_str::<serde_json::Value>(&card.data) {
             let s = v.get("s").and_then(|x| x.as_f64()).unwrap_or(0.0);
             let d = v.get("d").and_then(|x| x.as_f64()).unwrap_or(0.0);
             (s, d)
         } else {
             (0.0, 0.0)
         };
+
+        // Cards reviewed in Anki (not ankr) have no s/d stored, or store them
+        // in a format we can't parse. For review cards, estimate stability from
+        // the current interval: at the due date retrievability ≈ desired retention,
+        // so stability ≈ ivl is a safe bootstrap value. Without this, feeding
+        // stability=0 to the FSRS review formula produces NaN (0^{-w} = ∞ · 0).
+        if stability <= 0.0 && card.card_type == CardType::Review && card.ivl > 0 {
+            stability = card.ivl as f64;
+        }
+        // FSRS default difficulty is ~5; 0 produces nonsensical difficulty updates.
+        if difficulty <= 0.0 {
+            difficulty = 5.0;
+        }
 
         let state = match card.card_type {
             CardType::New => State::New,
@@ -78,7 +96,6 @@ impl FsrsScheduler {
             CardType::Relearning => State::Relearning,
         };
 
-        // Calculate last_review from current due and interval
         let now = Utc::now();
         let last_review = if card.ivl > 0 {
             now - chrono::Duration::days(card.ivl)

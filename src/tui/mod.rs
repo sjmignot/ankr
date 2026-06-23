@@ -32,6 +32,7 @@ pub struct AppConfig {
     pub db_path: PathBuf,
     pub media_dir: PathBuf,
     pub new_limit: u32,
+    pub review_limit: u32,
     pub readonly: bool,
 }
 
@@ -143,7 +144,7 @@ async fn run_app(
 
     let (ai_tx, mut ai_rx) = mpsc::channel::<std::result::Result<Vec<NewCard>, String>>(4);
 
-    let mut screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+    let mut screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
 
     loop {
         // Drain AI results
@@ -216,7 +217,7 @@ async fn run_app(
                             let now = queries::now_unix();
 
                             let learning = queries::get_learning_cards(&db.conn, deck_id, now)?;
-                            let due = queries::get_due_cards(&db.conn, deck_id, today)?;
+                            let due = queries::get_due_cards(&db.conn, deck_id, today, crt, config.review_limit)?;
                             let new = queries::get_new_cards(&db.conn, deck_id, config.new_limit as i64)?;
 
                             let notetypes = queries::get_all_notetypes(&db.conn)?;
@@ -272,7 +273,7 @@ async fn run_app(
                     ReviewAction::Quit => break,
                     ReviewAction::None => {}
                     ReviewAction::Back => {
-                        screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                        screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                     }
                     ReviewAction::Rated(rating, ms) => {
                         let was_new = rev.card.card_type == CardType::New;
@@ -313,7 +314,7 @@ async fn run_app(
             // ── Done ─────────────────────────────────────────────────────────
             Screen::Done(s) => {
                 if s.handle_key(&key) {
-                    screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                    screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                 }
             }
 
@@ -321,13 +322,13 @@ async fn run_app(
             Screen::Create(s) => match s.handle_key(key) {
                 CreateAction::None => {}
                 CreateAction::Cancel => {
-                    screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                    screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                 }
                 CreateAction::Save(card) => {
                     if !config.readonly {
                         queries::insert_note(&db.conn, &card)?;
                     }
-                    screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                    screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                 }
             },
 
@@ -335,7 +336,7 @@ async fn run_app(
             Screen::AiCreate(s) => match s.handle_key(key) {
                 AiAction::None => {}
                 AiAction::Cancel => {
-                    screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                    screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                 }
                 AiAction::Generate(text) => {
                     let did = s.deck_id;
@@ -355,12 +356,12 @@ async fn run_app(
                         let _ = queries::insert_note(&db.conn, &card);
                     }
                     if matches!(s.state, AiState::Done) {
-                        screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                        screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                     }
                 }
                 AiAction::SkipCard => {
                     if matches!(s.state, AiState::Done) {
-                        screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                        screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                     }
                 }
             },
@@ -369,7 +370,7 @@ async fn run_app(
             Screen::PoemCreate(s) => match s.handle_key(key) {
                 PoemCreateAction::None => {}
                 PoemCreateAction::Cancel => {
-                    screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                    screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                 }
                 PoemCreateAction::Save { cards, subdeck_path } => {
                     if !config.readonly {
@@ -379,7 +380,7 @@ async fn run_app(
                             queries::insert_note(&db.conn, &card)?;
                         }
                     }
-                    screen = Screen::DeckSelect(build_deck_select(&db, crt)?);
+                    screen = Screen::DeckSelect(build_deck_select(&db, crt, config.review_limit)?);
                 }
             },
         }
@@ -388,12 +389,12 @@ async fn run_app(
     Ok(())
 }
 
-fn build_deck_select(db: &DbConn, crt: i64) -> anyhow::Result<DeckSelectScreen> {
+fn build_deck_select(db: &DbConn, crt: i64, review_limit: u32) -> anyhow::Result<DeckSelectScreen> {
     let today = queries::today_day(crt);
     let now = queries::now_unix();
     let decks = queries::get_decks(&db.conn)?;
     let deck_list: Vec<(Deck, u32, u32, u32)> = decks.into_iter().map(|d| {
-        let (n, l, r) = queries::get_due_counts(&db.conn, d.id, today, now).unwrap_or((0, 0, 0));
+        let (n, l, r) = queries::get_due_counts(&db.conn, d.id, today, now, crt, review_limit).unwrap_or((0, 0, 0));
         (d, n, l, r)
     }).collect();
     Ok(DeckSelectScreen::new(deck_list))

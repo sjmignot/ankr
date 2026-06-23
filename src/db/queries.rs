@@ -98,16 +98,30 @@ pub fn get_or_create_deck_path(conn: &Connection, path: &str) -> Result<i64> {
     Ok(last_id)
 }
 
-pub fn get_due_counts(conn: &Connection, deck_id: i64, today: i64, now: i64) -> Result<(u32, u32, u32)> {
+/// Reviews already logged today for a deck (used to compute remaining daily allowance).
+pub fn get_today_review_count(conn: &Connection, deck_id: i64, crt: i64, today: i64) -> u32 {
+    let today_start_ms = (crt + today * 86400) * 1000;
+    conn.query_row(
+        "SELECT COUNT(*) FROM revlog r \
+         JOIN cards c ON c.id = r.cid \
+         WHERE c.did=?1 AND r.id>=?2 AND r.type IN (1,2)",
+        params![deck_id, today_start_ms],
+        |r| r.get(0),
+    ).unwrap_or(0)
+}
+
+pub fn get_due_counts(conn: &Connection, deck_id: i64, today: i64, now: i64, crt: i64, review_limit: u32) -> Result<(u32, u32, u32)> {
     let new: u32 = conn.query_row(
         "SELECT COUNT(*) FROM cards WHERE did=?1 AND queue=0",
         params![deck_id], |r| r.get(0))?;
     let learning: u32 = conn.query_row(
         "SELECT COUNT(*) FROM cards WHERE did=?1 AND queue=1 AND due<=?2",
         params![deck_id, now], |r| r.get(0))?;
-    let review: u32 = conn.query_row(
+    let total_due: u32 = conn.query_row(
         "SELECT COUNT(*) FROM cards WHERE did=?1 AND queue=2 AND due<=?2",
         params![deck_id, today], |r| r.get(0))?;
+    let done_today = get_today_review_count(conn, deck_id, crt, today);
+    let review = total_due.min(review_limit.saturating_sub(done_today));
     Ok((new, learning, review))
 }
 
@@ -130,11 +144,13 @@ fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
     })
 }
 
-pub fn get_due_cards(conn: &Connection, deck_id: i64, today: i64) -> Result<Vec<Card>> {
+pub fn get_due_cards(conn: &Connection, deck_id: i64, today: i64, crt: i64, review_limit: u32) -> Result<Vec<Card>> {
+    let done_today = get_today_review_count(conn, deck_id, crt, today);
+    let remaining = review_limit.saturating_sub(done_today) as i64;
     let mut stmt = conn.prepare(
         "SELECT id,nid,did,ord,type,queue,due,ivl,factor,reps,lapses,data \
-         FROM cards WHERE did=?1 AND queue=2 AND due<=?2 ORDER BY due")?;
-    let cards: Vec<Card> = stmt.query_map(params![deck_id, today], row_to_card)?
+         FROM cards WHERE did=?1 AND queue=2 AND due<=?2 ORDER BY due LIMIT ?3")?;
+    let cards: Vec<Card> = stmt.query_map(params![deck_id, today, remaining], row_to_card)?
         .filter_map(|r| r.ok()).collect();
     Ok(cards)
 }
@@ -264,8 +280,13 @@ pub fn write_review(conn: &Connection, result: &ReviewResult, crt: i64) -> Resul
     let mut data: serde_json::Value =
         serde_json::from_str(&existing).unwrap_or(serde_json::json!({}));
     data["lrt"] = serde_json::json!(now);
-    data["s"] = serde_json::json!(s.stability);
-    data["d"] = serde_json::json!(s.difficulty);
+    // Guard against NaN (produced when stability=0 fed into FSRS review formula).
+    if (s.stability as f64).is_finite() {
+        data["s"] = serde_json::json!(s.stability);
+    }
+    if (s.difficulty as f64).is_finite() {
+        data["d"] = serde_json::json!(s.difficulty);
+    }
     let data_str = data.to_string();
 
     conn.execute(
@@ -277,12 +298,20 @@ pub fn write_review(conn: &Connection, result: &ReviewResult, crt: i64) -> Resul
         ],
     )?;
 
+    // Anki revlog type: 0=Learning, 1=Review, 2=Relearning, 3=Filtered.
+    // CardType enum values don't align (Review=2 vs revlog Review=1), so map explicitly.
+    let revlog_type: i32 = match result.old_type {
+        0 | 1 => 0, // New/Learning → Learning
+        2 => 1,     // Review → Review
+        3 => 2,     // Relearning → Relearning
+        _ => 1,
+    };
     conn.execute(
         "INSERT INTO revlog (id, cid, usn, ease, ivl, lastIvl, factor, time, type) \
          VALUES (?1, ?2, -1, ?3, ?4, ?5, ?6, ?7, ?8)",
         params![
             result.reviewed_at_ms, result.card_id, result.rating,
-            s.interval, result.old_ivl, s.factor, result.time_taken_ms, result.old_type,
+            s.interval, result.old_ivl, s.factor, result.time_taken_ms, revlog_type,
         ],
     )?;
 

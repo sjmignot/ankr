@@ -292,8 +292,10 @@ impl SyncClient {
         eprintln!("  finish…");
         #[derive(Serialize)]
         struct Empty {}
-        // v11: finish returns the new server mod as a bare JSON integer.
-        let new_mod: i64 = self.post("finish", &Empty {}).await?;
+        // v11: finish returns the new server mod as a bare JSON integer (milliseconds).
+        // col.ls and col.mod are stored in seconds; convert so touch_col comparisons work.
+        let new_mod_ms: i64 = self.post("finish", &Empty {}).await?;
+        let new_mod_secs = if new_mod_ms > 10_000_000_000 { new_mod_ms / 1000 } else { new_mod_ms };
         let new_usn = meta.usn;
 
         conn.execute("UPDATE cards  SET usn=?1 WHERE usn=-1", params![new_usn])?;
@@ -302,7 +304,7 @@ impl SyncClient {
         conn.execute("UPDATE graves SET usn=?1 WHERE usn=-1", params![new_usn])?;
         conn.execute(
             "UPDATE col SET usn=?1, ls=?2, mod=?3",
-            params![new_usn, new_mod, new_mod],
+            params![new_usn, new_mod_secs, new_mod_secs],
         )?;
 
         Ok(SyncSummary {

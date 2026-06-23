@@ -16,6 +16,10 @@ pub struct Cli {
     #[arg(short = 'n', long, default_value = "20")]
     pub new_limit: u32,
 
+    /// Daily review cap (matches Anki's default of 200)
+    #[arg(short = 'r', long, default_value = "200")]
+    pub review_limit: u32,
+
     /// Never write to the database (read-only preview)
     #[arg(long)]
     pub readonly: bool,
