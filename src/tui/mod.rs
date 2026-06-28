@@ -52,14 +52,14 @@ enum Screen {
 }
 
 /// Run just the poem creation screen, then exit. Used by `ankr poem` with no input.
-pub async fn run_poem(db: DbConn, deck_name: String, deck_id: i64, notetype_id: i64) -> anyhow::Result<()> {
+pub async fn run_poem(db: DbConn, deck_name: String, deck_id: i64, notetype_id: i64, readonly: bool) -> anyhow::Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_poem_app(&mut terminal, &db, deck_name, deck_id, notetype_id).await;
+    let result = run_poem_app(&mut terminal, &db, deck_name, deck_id, notetype_id, readonly).await;
 
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
@@ -73,6 +73,7 @@ async fn run_poem_app(
     deck_name: String,
     deck_id: i64,
     notetype_id: i64,
+    readonly: bool,
 ) -> anyhow::Result<()> {
     let mut screen = PoemCreateScreen::new(deck_name, deck_id, notetype_id);
     loop {
@@ -102,14 +103,18 @@ async fn run_poem_app(
             PoemCreateAction::None => {}
             PoemCreateAction::Cancel => break,
             PoemCreateAction::Save { cards, subdeck_path } => {
-                let did = queries::get_or_create_deck_path(&db.conn, &subdeck_path)?;
-                let n = cards.len();
-                for mut card in cards {
-                    card.deck_id = did;
-                    queries::insert_note(&db.conn, &card)?;
+                if readonly {
+                    eprintln!("Cannot save cards: running in read-only mode (--readonly).");
+                } else {
+                    let did = queries::get_or_create_deck_path(&db.conn, &subdeck_path)?;
+                    let n = cards.len();
+                    for mut card in cards {
+                        card.deck_id = did;
+                        queries::insert_note(&db.conn, &card)?;
+                    }
+                    eprintln!("Created {n} cards in \"{subdeck_path}\".");
                 }
                 drop(screen);
-                eprintln!("Created {n} cards in \"{subdeck_path}\".");
                 break;
             }
         }
@@ -201,6 +206,14 @@ async fn run_app(
                     if let Some(deck) = s.selected_deck() {
                         let cloze_id = queries::get_cloze_notetype_id(&db.conn)?.unwrap_or(0);
                         screen = Screen::PoemCreate(PoemCreateScreen::new(deck.name.clone(), deck.id, cloze_id));
+                    }
+                    continue;
+                }
+                if key.code == KeyCode::Char('a') {
+                    if let Some(deck) = s.selected_deck() {
+                        let deck_id = deck.id;
+                        let notetype_id = queries::get_cloze_notetype_id(&db.conn)?.unwrap_or(0);
+                        screen = Screen::AiCreate(AiCreateScreen::new(deck_id, notetype_id));
                     }
                     continue;
                 }
@@ -384,6 +397,89 @@ async fn run_app(
         }
     }
 
+    Ok(())
+}
+
+/// Run just the AI card creation screen, then exit. Used by `ankr ai`.
+pub async fn run_ai(db: DbConn, deck_id: i64, notetype_id: i64, readonly: bool) -> anyhow::Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture, EnableBracketedPaste)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = run_ai_app(&mut terminal, &db, deck_id, notetype_id, readonly).await;
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen, DisableMouseCapture, DisableBracketedPaste)?;
+    terminal.show_cursor()?;
+    result
+}
+
+async fn run_ai_app(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    db: &DbConn,
+    deck_id: i64,
+    notetype_id: i64,
+    readonly: bool,
+) -> anyhow::Result<()> {
+    use screens::ai_create::AiState;
+    let (ai_tx, mut ai_rx) = mpsc::channel::<std::result::Result<Vec<NewCard>, String>>(4);
+    let mut screen = AiCreateScreen::new(deck_id, notetype_id);
+
+    loop {
+        while let Ok(result) = ai_rx.try_recv() {
+            match result {
+                Ok(cards) => screen.set_cards(cards),
+                Err(e) => screen.set_error(e),
+            }
+        }
+        screen.tick();
+
+        terminal.draw(|f| screen.render(f, f.area()))?;
+
+        let maybe_event = tokio::task::spawn_blocking(|| {
+            if crossterm::event::poll(Duration::from_millis(100)).unwrap_or(false) {
+                crossterm::event::read().ok()
+            } else {
+                None
+            }
+        })
+        .await?;
+
+        let Some(crossterm::event::Event::Key(key)) = maybe_event else { continue };
+
+        match screen.handle_key(key) {
+            AiAction::None => {}
+            AiAction::Cancel => break,
+            AiAction::Generate(text) => {
+                let did = screen.deck_id;
+                let ntid = screen.notetype_id;
+                let tx = ai_tx.clone();
+                tokio::spawn(async move {
+                    let result = match ClaudeClient::from_env() {
+                        Ok(client) => client.generate_cards(&text, "", did, ntid).await
+                            .map_err(|e| e.to_string()),
+                        Err(e) => Err(e.to_string()),
+                    };
+                    let _ = tx.send(result).await;
+                });
+            }
+            AiAction::AcceptCard(card) => {
+                if !readonly {
+                    let _ = queries::insert_note(&db.conn, &card);
+                }
+                if matches!(screen.state, AiState::Done) {
+                    break;
+                }
+            }
+            AiAction::SkipCard => {
+                if matches!(screen.state, AiState::Done) {
+                    break;
+                }
+            }
+        }
+    }
     Ok(())
 }
 

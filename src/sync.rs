@@ -297,6 +297,7 @@ impl SyncClient {
         let new_mod_secs = if new_mod_ms > 10_000_000_000 { new_mod_ms / 1000 } else { new_mod_ms };
         let new_usn = meta.usn;
 
+        conn.execute_batch("BEGIN IMMEDIATE")?;
         conn.execute("UPDATE cards  SET usn=?1 WHERE usn=-1", params![new_usn])?;
         conn.execute("UPDATE revlog SET usn=?1 WHERE usn=-1", params![new_usn])?;
         conn.execute("UPDATE notes  SET usn=?1 WHERE usn=-1", params![new_usn])?;
@@ -305,6 +306,7 @@ impl SyncClient {
             "UPDATE col SET usn=?1, ls=?2, mod=?3",
             params![new_usn, new_mod_secs, new_mod_secs],
         )?;
+        conn.execute_batch("COMMIT")?;
 
         Ok(SyncSummary {
             pushed_cards,
@@ -328,11 +330,18 @@ pub struct SyncSummary {
 
 fn simple_session_id() -> String {
     let table = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
-    let n = std::time::SystemTime::now()
+    let t = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
-        .subsec_nanos() as usize;
-    (0..8).map(|i| table[(n.wrapping_shr(i * 4)) % table.len()] as char).collect()
+        .as_nanos();
+    let pid = std::process::id() as u128;
+    // Mix time + PID through a multiplicative hash so each call produces distinct output.
+    let mut n = t ^ (pid << 32) ^ (pid >> 32);
+    n = n.wrapping_mul(0x9e3779b97f4a7c15).wrapping_add(0x6c62272e07bb0142);
+    (0..8).map(|_| {
+        n = n.wrapping_mul(0x6c62272e07bb0142).wrapping_add(0x517cc1b727220a95);
+        table[(n >> 59) as usize % table.len()] as char
+    }).collect()
 }
 
 // ── Local change collection ───────────────────────────────────────────────────
@@ -425,6 +434,7 @@ fn apply_server_graves(conn: &Connection, graves: &Graves) -> Result<()> {
         conn.execute("DELETE FROM cards WHERE id=?1", params![id])?;
     }
     for id in &graves.notes {
+        conn.execute("DELETE FROM cards WHERE nid=?1", params![id])?;
         conn.execute("DELETE FROM notes WHERE id=?1", params![id])?;
     }
     for id in &graves.decks {

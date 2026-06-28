@@ -120,6 +120,24 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        Some(Commands::Ai { deck }) => {
+            let decks = queries::get_decks(&db.conn)?;
+            let matched = decks.iter().find(|d| {
+                d.name.to_lowercase().contains(&deck.to_lowercase())
+            });
+            let deck_entry = match matched {
+                Some(d) => d.clone(),
+                None => {
+                    let id = queries::get_or_create_deck_path(&db.conn, &deck)?;
+                    eprintln!("Created deck \"{}\".", deck);
+                    models::Deck { id, name: deck.clone() }
+                }
+            };
+            let notetype_id = queries::get_cloze_notetype_id(&db.conn)?
+                .ok_or_else(|| anyhow::anyhow!("No cloze notetype found in collection."))?;
+            tui::run_ai(db, deck_entry.id, notetype_id, cli.readonly).await?;
+        }
+
         Some(Commands::Poem { file, deck, tags, stanza, dry_run }) => {
             use std::io::IsTerminal;
 
@@ -141,7 +159,7 @@ async fn main() -> anyhow::Result<()> {
 
             // No file and stdin is a terminal → open TUI poem screen
             if file.is_none() && std::io::stdin().is_terminal() {
-                tui::run_poem(db, deck_entry.name.clone(), deck_entry.id, notetype_id).await?;
+                tui::run_poem(db, deck_entry.name.clone(), deck_entry.id, notetype_id, cli.readonly).await?;
                 return Ok(());
             }
 

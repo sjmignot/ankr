@@ -3,7 +3,7 @@ use regex::Regex;
 
 static CLOZE_RE: Lazy<Regex> = Lazy::new(|| {
     // Matches {{cN::answer}} or {{cN::answer::hint}}
-    Regex::new(r"\{\{c(\d+)::([^:}]+)(?:::([^}]+))?\}\}").unwrap()
+    Regex::new(r"\{\{c(\d+)::(.+?)(?:::(.+?))?\}\}").unwrap()
 });
 
 /// Render the question side: the active ordinal is masked; others are shown plainly.

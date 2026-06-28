@@ -44,6 +44,13 @@ pub enum Commands {
         password: Option<String>,
     },
 
+    /// Generate Anki cards from text using AI (requires ANTHROPIC_API_KEY)
+    Ai {
+        /// Deck name (substring match, case-insensitive)
+        #[arg(short, long, default_value = "Default")]
+        deck: String,
+    },
+
     /// Create Anki cards from a poem using the LPCG method
     Poem {
         /// Poem text file (reads from stdin if omitted)

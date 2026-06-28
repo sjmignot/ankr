@@ -24,6 +24,7 @@ impl FsrsScheduler {
 
         let _today = today_day(crt);
         let due_days = (next.due - now).num_days().max(0);
+        let due_ts = next.due.timestamp();
         let scheduled_days = next.scheduled_days.max(0);
 
         let (new_type, new_queue) = match next.state {
@@ -55,6 +56,7 @@ impl FsrsScheduler {
             stability: next.stability as f32,
             difficulty: next.difficulty as f32,
             due_days,
+            due_ts,
             interval: scheduled_days,
             new_reps,
             new_lapses,

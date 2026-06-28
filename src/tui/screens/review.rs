@@ -222,7 +222,12 @@ impl ReviewScreen {
         let (_, srcs) = html::extract(&side_html);
         let has_image = !srcs.is_empty();
         let is_question = matches!(&self.side, Side::Question);
-        let answer_h = if is_question { 3u16 } else { 0 };
+        // Grow height with content: +2 for borders, min 3, max 8.
+        let answer_h = if is_question {
+            (self.answer_input.lines().len() as u16 + 2).max(3).min(8)
+        } else {
+            0
+        };
 
         if has_image {
             // Determine image orientation to pick the best layout.
@@ -479,7 +484,7 @@ fn extract_cloze_answer(text: &str, active_ord: u32) -> String {
     use once_cell::sync::Lazy;
     use regex::Regex;
     static RE: Lazy<Regex> = Lazy::new(|| {
-        Regex::new(r"\{\{c(\d+)::([^:}]+)(?:::([^}]+))?\}\}").unwrap()
+        Regex::new(r"\{\{c(\d+)::(.+?)(?:::(.+?))?\}\}").unwrap()
     });
     RE.captures_iter(text)
         .find(|c| c[1].parse::<u32>().ok() == Some(active_ord))

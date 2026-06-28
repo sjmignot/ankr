@@ -1,4 +1,5 @@
 use rusqlite::{Connection, params};
+use sha1::{Sha1, Digest};
 use crate::error::Result;
 use crate::models::*;
 
@@ -248,7 +249,12 @@ fn touch_col(conn: &Connection) -> Result<()> {
 pub fn write_review(conn: &Connection, result: &ReviewResult, crt: i64) -> Result<()> {
     let s = &result.new_state;
     let today = today_day(crt);
-    let due = today + s.due_days;
+    // Learning/Relearning cards use an absolute Unix timestamp; Review/New use a day offset.
+    let due = if s.card_type == CardType::Learning as i32 || s.card_type == CardType::Relearning as i32 {
+        s.due_ts
+    } else {
+        today + s.due_days
+    };
     let now = now_unix();
 
     // Merge into existing data: preserve Anki's `pos` field and add `lrt`
@@ -310,34 +316,39 @@ pub fn insert_note(conn: &Connection, note: &NewCard) -> Result<i64> {
         format!("{}\x1f{}", note.text, note.back)
     };
     let tags = note.tags.join(" ");
-    // Simple sort-field checksum
-    let sfld = note.text.chars().take(20).collect::<String>();
-    let csum: i64 = sfld.bytes().fold(0i64, |a, b| a.wrapping_add(b as i64));
+    let sfld = note.text.clone();
+    // Anki checksum: first 8 hex digits of SHA-1(sort_field) as decimal integer.
+    let hash = Sha1::digest(sfld.as_bytes());
+    let csum = u32::from_be_bytes([hash[0], hash[1], hash[2], hash[3]]) as i64;
 
-    conn.execute(
-        "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) \
-         VALUES (?1, ?2, ?3, ?4, -1, ?5, ?6, ?7, ?8, 0, '')",
-        params![id, format!("{id:x}"), note.notetype_id, now, tags, flds, sfld, csum],
-    )?;
-
-    let nid = conn.last_insert_rowid();
-    let notetype = get_notetype(conn, note.notetype_id)?;
-
-    match notetype.kind {
-        NoteKind::Cloze => {
-            for ord in extract_cloze_ords(&note.text) {
-                insert_card(conn, nid, note.deck_id, ord as i32, now)?;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let result: Result<i64> = (|| -> Result<i64> {
+        conn.execute(
+            "INSERT INTO notes (id, guid, mid, mod, usn, tags, flds, sfld, csum, flags, data) \
+             VALUES (?1, ?2, ?3, ?4, -1, ?5, ?6, ?7, ?8, 0, '')",
+            params![id, format!("{id:x}"), note.notetype_id, now, tags, flds, sfld, csum],
+        )?;
+        let nid = conn.last_insert_rowid();
+        let notetype = get_notetype(conn, note.notetype_id)?;
+        match notetype.kind {
+            NoteKind::Cloze => {
+                for ord in extract_cloze_ords(&note.text) {
+                    insert_card(conn, nid, note.deck_id, ord as i32, now)?;
+                }
+            }
+            NoteKind::Standard => {
+                for tmpl in &notetype.templates {
+                    insert_card(conn, nid, note.deck_id, tmpl.ord, now)?;
+                }
             }
         }
-        NoteKind::Standard => {
-            for tmpl in &notetype.templates {
-                insert_card(conn, nid, note.deck_id, tmpl.ord, now)?;
-            }
-        }
+        touch_col(conn)?;
+        Ok(nid)
+    })();
+    match result {
+        Ok(nid) => { conn.execute_batch("COMMIT")?; Ok(nid) }
+        Err(e) => { let _ = conn.execute_batch("ROLLBACK"); Err(e) }
     }
-
-    touch_col(conn)?;
-    Ok(nid)
 }
 
 fn insert_card(conn: &Connection, nid: i64, did: i64, ord: i32, now: i64) -> Result<()> {
