@@ -54,11 +54,14 @@ impl DeckSelectScreen {
         frame.render_widget(title, chunks[0]);
 
         let items: Vec<ListItem> = self.decks.iter().map(|(deck, new, learning, review)| {
+            let depth = deck.name.matches("::").count();
+            let short = deck.name.rsplit("::").next().unwrap_or(&deck.name);
+            let label = format!("{}{}", "  ".repeat(depth), short);
             let line = Line::from(vec![
-                Span::raw(format!("{:<40}", deck.name)),
+                Span::raw(format!("{:<40}", label)),
                 Span::styled(format!(" {new}n "), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{learning}l "), Style::default().fg(Color::Red)),
-                Span::styled(format!("{review}r", ), Style::default().fg(Color::Green)),
+                Span::styled(format!("{review}r"), Style::default().fg(Color::Green)),
             ]);
             ListItem::new(line)
         }).collect();
