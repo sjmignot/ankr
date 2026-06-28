@@ -8,8 +8,6 @@ use crate::error::{AnkrError, Result};
 
 pub struct DbConn {
     pub conn: Connection,
-    pub db_path: PathBuf,
-    pub readonly: bool,
 }
 
 impl DbConn {
@@ -35,11 +33,7 @@ impl DbConn {
         }
         conn.execute_batch("PRAGMA foreign_keys=ON;")?;
 
-        Ok(Self {
-            conn,
-            db_path: db_path.to_owned(),
-            readonly,
-        })
+        Ok(Self { conn })
     }
 }
 

@@ -16,7 +16,6 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::sync::mpsc;
 
 use crate::db::{DbConn, queries};
-use crate::error::Result;
 use crate::models::*;
 use crate::scheduler::FsrsScheduler;
 use crate::review::ReviewQueue;
@@ -29,7 +28,6 @@ use screens::create::CreateAction;
 use screens::poem_create::PoemCreateAction;
 
 pub struct AppConfig {
-    pub db_path: PathBuf,
     pub media_dir: PathBuf,
     pub new_limit: u32,
     pub review_limit: u32,

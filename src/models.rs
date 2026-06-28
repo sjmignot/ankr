@@ -54,26 +54,13 @@ pub enum Rating {
     Easy = 4,
 }
 
-impl Rating {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Again => "Again",
-            Self::Hard => "Hard",
-            Self::Good => "Good",
-            Self::Easy => "Easy",
-        }
-    }
-}
 
 #[derive(Debug, Clone)]
 pub struct Card {
     pub id: i64,
     pub nid: i64,
-    pub did: i64,
     pub ord: i32,
     pub card_type: CardType,
-    pub queue: Queue,
-    pub due: i64,
     pub ivl: i64,
     pub factor: i64,
     pub reps: i32,
@@ -84,7 +71,6 @@ pub struct Card {
 #[derive(Debug, Clone)]
 pub struct Note {
     pub id: i64,
-    pub guid: String,
     pub mid: i64,
     pub flds: String,
     pub tags: String,
@@ -92,14 +78,12 @@ pub struct Note {
 
 #[derive(Debug, Clone)]
 pub struct FieldDef {
-    pub ord: i32,
     pub name: String,
 }
 
 #[derive(Debug, Clone)]
 pub struct Template {
     pub ord: i32,
-    pub name: String,
     pub qfmt: String,
     pub afmt: String,
 }
@@ -112,7 +96,6 @@ pub enum NoteKind {
 
 #[derive(Debug, Clone)]
 pub struct NoteType {
-    pub id: i64,
     pub name: String,
     pub kind: NoteKind,
     pub fields: Vec<FieldDef>,
@@ -128,13 +111,6 @@ pub struct ResolvedNote {
 }
 
 impl ResolvedNote {
-    pub fn field(&self, name: &str) -> Option<&str> {
-        self.fields
-            .iter()
-            .find(|(n, _)| n.eq_ignore_ascii_case(name))
-            .map(|(_, v)| v.as_str())
-    }
-
     pub fn first_field(&self) -> &str {
         self.fields.first().map(|(_, v)| v.as_str()).unwrap_or("")
     }
@@ -146,19 +122,6 @@ pub struct Deck {
     pub name: String,
 }
 
-impl Deck {
-    pub fn short_name(&self) -> &str {
-        self.name.rsplit("::").next().unwrap_or(&self.name)
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct FsrsData {
-    #[serde(default)]
-    pub s: f32,
-    #[serde(default)]
-    pub d: f32,
-}
 
 #[derive(Debug, Clone)]
 pub struct CardState {

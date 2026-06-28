@@ -54,12 +54,6 @@ impl DeckSelectScreen {
         frame.render_widget(title, chunks[0]);
 
         let items: Vec<ListItem> = self.decks.iter().map(|(deck, new, learning, review)| {
-            let total = new + learning + review;
-            let count_style = if total > 0 {
-                Style::default().fg(Color::Yellow)
-            } else {
-                Style::default().fg(Color::DarkGray)
-            };
             let line = Line::from(vec![
                 Span::raw(format!("{:<40}", deck.name)),
                 Span::styled(format!(" {new}n "), Style::default().fg(Color::Cyan)),

@@ -131,16 +131,13 @@ fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
     Ok(Card {
         id: row.get(0)?,
         nid: row.get(1)?,
-        did: row.get(2)?,
-        ord: row.get(3)?,
-        card_type: CardType::try_from(row.get::<_, i32>(4)?).unwrap_or(CardType::New),
-        queue: Queue::try_from(row.get::<_, i32>(5)?).unwrap_or(Queue::New),
-        due: row.get(6)?,
-        ivl: row.get(7)?,
-        factor: row.get(8)?,
-        reps: row.get(9)?,
-        lapses: row.get(10)?,
-        data: row.get::<_, Option<String>>(11)?.unwrap_or_default(),
+        ord: row.get(2)?,
+        card_type: CardType::try_from(row.get::<_, i32>(3)?).unwrap_or(CardType::New),
+        ivl: row.get(4)?,
+        factor: row.get(5)?,
+        reps: row.get(6)?,
+        lapses: row.get(7)?,
+        data: row.get::<_, Option<String>>(8)?.unwrap_or_default(),
     })
 }
 
@@ -148,7 +145,7 @@ pub fn get_due_cards(conn: &Connection, deck_id: i64, today: i64, crt: i64, revi
     let done_today = get_today_review_count(conn, deck_id, crt, today);
     let remaining = review_limit.saturating_sub(done_today) as i64;
     let mut stmt = conn.prepare(
-        "SELECT id,nid,did,ord,type,queue,due,ivl,factor,reps,lapses,data \
+        "SELECT id,nid,ord,type,ivl,factor,reps,lapses,data \
          FROM cards WHERE did=?1 AND queue=2 AND due<=?2 ORDER BY due LIMIT ?3")?;
     let cards: Vec<Card> = stmt.query_map(params![deck_id, today, remaining], row_to_card)?
         .filter_map(|r| r.ok()).collect();
@@ -157,7 +154,7 @@ pub fn get_due_cards(conn: &Connection, deck_id: i64, today: i64, crt: i64, revi
 
 pub fn get_learning_cards(conn: &Connection, deck_id: i64, now: i64) -> Result<Vec<Card>> {
     let mut stmt = conn.prepare(
-        "SELECT id,nid,did,ord,type,queue,due,ivl,factor,reps,lapses,data \
+        "SELECT id,nid,ord,type,ivl,factor,reps,lapses,data \
          FROM cards WHERE did=?1 AND queue=1 AND due<=?2 ORDER BY due")?;
     let cards: Vec<Card> = stmt.query_map(params![deck_id, now], row_to_card)?
         .filter_map(|r| r.ok()).collect();
@@ -166,7 +163,7 @@ pub fn get_learning_cards(conn: &Connection, deck_id: i64, now: i64) -> Result<V
 
 pub fn get_new_cards(conn: &Connection, deck_id: i64, limit: i64) -> Result<Vec<Card>> {
     let mut stmt = conn.prepare(
-        "SELECT id,nid,did,ord,type,queue,due,ivl,factor,reps,lapses,data \
+        "SELECT id,nid,ord,type,ivl,factor,reps,lapses,data \
          FROM cards WHERE did=?1 AND queue=0 ORDER BY due LIMIT ?2")?;
     let cards: Vec<Card> = stmt.query_map(params![deck_id, limit], row_to_card)?
         .filter_map(|r| r.ok()).collect();
@@ -177,14 +174,13 @@ pub fn get_new_cards(conn: &Connection, deck_id: i64, limit: i64) -> Result<Vec<
 
 pub fn get_note(conn: &Connection, nid: i64) -> Result<Note> {
     Ok(conn.query_row(
-        "SELECT id,guid,mid,flds,tags FROM notes WHERE id=?1",
+        "SELECT id,mid,flds,tags FROM notes WHERE id=?1",
         params![nid],
         |row| Ok(Note {
             id: row.get(0)?,
-            guid: row.get(1)?,
-            mid: row.get(2)?,
-            flds: row.get(3)?,
-            tags: row.get(4)?,
+            mid: row.get(1)?,
+            flds: row.get(2)?,
+            tags: row.get(3)?,
         }),
     )?)
 }

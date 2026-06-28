@@ -189,7 +189,6 @@ async fn main() -> anyhow::Result<()> {
 
         None => {
             let config = tui::AppConfig {
-                db_path: db_path.clone(),
                 media_dir: media,
                 new_limit: cli.new_limit,
                 review_limit: cli.review_limit,
