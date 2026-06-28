@@ -2,6 +2,13 @@
 name = "ankr"
 version = "0.1.0"
 edition = "2021"
+description = "Terminal Anki client — review cards, sync with AnkiWeb, and create cards from the command line"
+license = "MIT"
+repository = "https://github.com/sjmignot/ankr"
+homepage = "https://github.com/sjmignot/ankr"
+readme = "README.md"
+keywords = ["anki", "flashcards", "spaced-repetition", "tui", "cli"]
+categories = ["command-line-utilities"]
 
 [[bin]]
 name = "ankr"
