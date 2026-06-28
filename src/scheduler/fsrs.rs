@@ -5,14 +5,12 @@ use crate::db::queries::today_day;
 
 pub struct FsrsScheduler {
     pub params: Parameters,
-    pub desired_retention: f32,
 }
 
 impl FsrsScheduler {
-    pub fn new(desired_retention: f32) -> Self {
+    pub fn new(_desired_retention: f32) -> Self {
         Self {
             params: Parameters::default(),
-            desired_retention,
         }
     }
 

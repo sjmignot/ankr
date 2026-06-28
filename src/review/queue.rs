@@ -6,7 +6,6 @@ pub struct ReviewQueue {
     due: VecDeque<Card>,
     new: VecDeque<Card>,
     pub stats: SessionStats,
-    pub new_limit: u32,
 }
 
 impl ReviewQueue {
@@ -22,7 +21,6 @@ impl ReviewQueue {
             due: due.into(),
             new: capped_new,
             stats: SessionStats::default(),
-            new_limit,
         }
     }
 

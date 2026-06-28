@@ -40,17 +40,3 @@ pub fn render_answer(text: &str, active_ord: u32) -> String {
     }).to_string()
 }
 
-/// Returns true if the field contains any cloze deletions.
-pub fn has_cloze(text: &str) -> bool {
-    CLOZE_RE.is_match(text)
-}
-
-/// Collects all unique cloze ordinals (1-indexed) in the text.
-pub fn cloze_ords(text: &str) -> Vec<u32> {
-    let mut ords: Vec<u32> = CLOZE_RE.captures_iter(text)
-        .filter_map(|c| c[1].parse().ok())
-        .collect();
-    ords.sort_unstable();
-    ords.dedup();
-    ords
-}

@@ -46,22 +46,6 @@ pub fn get_decks(conn: &Connection) -> Result<Vec<Deck>> {
     Ok(decks)
 }
 
-/// Create a new normal deck and return its id.
-///
-/// Uses minimal protobuf blobs that Anki accepts for a default normal deck:
-/// - `kind`: DeckKind { normal: NormalDeck {} } → [0x0a, 0x00]
-/// - `common`: DeckCommon {} → [] (all fields default)
-pub fn create_deck(conn: &Connection, name: &str) -> Result<i64> {
-    let id = now_ms();
-    let kind: &[u8] = &[0x0a, 0x00];
-    let common: &[u8] = &[];
-    conn.execute(
-        "INSERT INTO decks (id, name, mtime_secs, usn, common, kind) \
-         VALUES (?1, ?2, ?3, -1, ?4, ?5)",
-        params![id, name, now_unix(), common, kind],
-    )?;
-    Ok(id)
-}
 
 /// Resolve a `::` -separated deck path, creating any missing ancestors along
 /// the way, and return the leaf deck's id.
@@ -192,33 +176,33 @@ fn is_cloze_config(blob: &[u8]) -> bool {
 }
 
 pub fn get_notetype(conn: &Connection, mid: i64) -> Result<NoteType> {
-    let (id, name, config_blob): (i64, String, Vec<u8>) = conn.query_row(
-        "SELECT id, name, config FROM notetypes WHERE id=?1",
+    let (name, config_blob): (String, Vec<u8>) = conn.query_row(
+        "SELECT name, config FROM notetypes WHERE id=?1",
         params![mid],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, Vec<u8>>(2)?)),
+        |row| Ok((row.get(0)?, row.get::<_, Vec<u8>>(1)?)),
     )?;
 
     let kind = if is_cloze_config(&config_blob) { NoteKind::Cloze } else { NoteKind::Standard };
 
     let mut fld_stmt = conn.prepare(
-        "SELECT ord, name FROM fields WHERE ntid=?1 ORDER BY ord")?;
+        "SELECT name FROM fields WHERE ntid=?1 ORDER BY ord")?;
     let fields: Vec<FieldDef> = fld_stmt.query_map(params![mid], |row| {
-        Ok(FieldDef { ord: row.get(0)?, name: row.get(1)? })
+        Ok(FieldDef { name: row.get(0)? })
     })?
     .filter_map(|r| r.ok())
     .collect();
 
     let mut tmpl_stmt = conn.prepare(
-        "SELECT ord, name, config FROM templates WHERE ntid=?1 ORDER BY ord")?;
+        "SELECT ord, config FROM templates WHERE ntid=?1 ORDER BY ord")?;
     let templates: Vec<Template> = tmpl_stmt.query_map(params![mid], |row| {
-        let config: Vec<u8> = row.get(2)?;
+        let config: Vec<u8> = row.get(1)?;
         let (qfmt, afmt) = decode_template_config(&config);
-        Ok(Template { ord: row.get(0)?, name: row.get(1)?, qfmt, afmt })
+        Ok(Template { ord: row.get(0)?, qfmt, afmt })
     })?
     .filter_map(|r| r.ok())
     .collect();
 
-    Ok(NoteType { id, name, kind, fields, templates })
+    Ok(NoteType { name, kind, fields, templates })
 }
 
 pub fn get_resolved_note(conn: &Connection, card: &Card) -> Result<ResolvedNote> {

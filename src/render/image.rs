@@ -75,9 +75,6 @@ impl ImageCache {
         self.get(src).map(|img| (img.width(), img.height()))
     }
 
-    pub fn media_dir(&self) -> &PathBuf {
-        &self.media_dir
-    }
 }
 
 /// Quadrant block characters indexed by 4-bit pattern (bit3=UL, bit2=UR, bit1=LL, bit0=LR).
@@ -154,123 +151,6 @@ fn avg_rgb(pxs: &[image::Rgba<u8>; 4], idxs: &[usize]) -> (u8, u8, u8) {
     ((r / n) as u8, (g / n) as u8, (b / n) as u8)
 }
 
-/// Render an image using Unicode braille patterns with truecolor fg/bg.
-///
-/// Each terminal cell covers a 2×4 dot grid (8 sub-pixels). Braille dots are
-/// approximately square in most terminal fonts, giving the highest pixel density
-/// achievable with pure Unicode — 2× more than quadrant blocks.
-///
-/// Dot layout within one character cell (col, row):
-///   (0,0)=dot1(b0)  (1,0)=dot4(b3)
-///   (0,1)=dot2(b1)  (1,1)=dot5(b4)
-///   (0,2)=dot3(b2)  (1,2)=dot6(b5)
-///   (0,3)=dot7(b6)  (1,3)=dot8(b7)
-pub fn to_braille(img: &DynamicImage, cell_w: u16, cell_h: u16) -> Vec<Line<'static>> {
-    if cell_w == 0 || cell_h == 0 { return vec![]; }
-    // 2 cols × 4 rows of pixels per char; aspect ratio from fit_dimensions already correct.
-    let px_w = (cell_w as u32) * 2;
-    let px_h = (cell_h as u32) * 4;
-    let resized = img.resize_exact(px_w, px_h, image::imageops::FilterType::Lanczos3);
-
-    // Unicode braille bit position for pixel at (col, row) within a 2×4 block.
-    const BRAILLE_BIT: [[u8; 2]; 4] = [
-        [0, 3],
-        [1, 4],
-        [2, 5],
-        [6, 7],
-    ];
-
-    let mut lines = Vec::with_capacity(cell_h as usize);
-    for cell_row in 0..cell_h as u32 {
-        let mut spans = Vec::with_capacity(cell_w as usize);
-        for cell_col in 0..cell_w as u32 {
-            let base_x = cell_col * 2;
-            let base_y = cell_row * 4;
-
-            // Sample the 2×4 pixel block into flat arrays [row*2 + col].
-            let mut rgb = [[0u8; 3]; 8];
-            let mut lumas = [0f32; 8];
-            for dr in 0..4u32 {
-                for dc in 0..2u32 {
-                    let px = resized.get_pixel(
-                        (base_x + dc).min(px_w - 1),
-                        (base_y + dr).min(px_h - 1),
-                    ).to_rgba();
-                    let k = (dr * 2 + dc) as usize;
-                    rgb[k] = [px[0], px[1], px[2]];
-                    lumas[k] = 0.2126 * px[0] as f32
-                              + 0.7152 * px[1] as f32
-                              + 0.0722 * px[2] as f32;
-                }
-            }
-
-            let lmin = lumas.iter().cloned().fold(f32::INFINITY, f32::min);
-            let lmax = lumas.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
-
-            let (ch, fg, bg) = if lmax - lmin < 24.0 {
-                // Uniform block — solid fill with mean color, no dot noise.
-                let c = mean8(&rgb, 0..8);
-                ('█', c, c)
-            } else {
-                let mid = (lmin + lmax) / 2.0;
-                let mut bits = 0u8;
-                for dr in 0..4usize {
-                    for dc in 0..2usize {
-                        if lumas[dr * 2 + dc] >= mid {
-                            bits |= 1 << BRAILLE_BIT[dr][dc];
-                        }
-                    }
-                }
-                let fg = mean8(&rgb, (0..8).filter(|&i| lumas[i] >= mid));
-                let bg = mean8(&rgb, (0..8).filter(|&i| lumas[i] <  mid));
-                let ch = char::from_u32(0x2800 | bits as u32).unwrap_or('█');
-                (ch, fg, bg)
-            };
-
-            spans.push(Span::styled(
-                ch.to_string(),
-                Style::default()
-                    .fg(Color::Rgb(fg.0, fg.1, fg.2))
-                    .bg(Color::Rgb(bg.0, bg.1, bg.2)),
-            ));
-        }
-        lines.push(Line::from(spans));
-    }
-    lines
-}
-
-fn mean8(rgb: &[[u8; 3]; 8], idxs: impl Iterator<Item = usize>) -> (u8, u8, u8) {
-    let (mut r, mut g, mut b, mut n) = (0u32, 0u32, 0u32, 0u32);
-    for i in idxs {
-        r += rgb[i][0] as u32; g += rgb[i][1] as u32; b += rgb[i][2] as u32; n += 1;
-    }
-    if n == 0 { return (0, 0, 0); }
-    ((r / n) as u8, (g / n) as u8, (b / n) as u8)
-}
-
-/// Render an image as Unicode half-block (▀) art for ratatui.
-pub fn to_halfblocks(img: &DynamicImage, cell_w: u16, cell_h: u16) -> Vec<Line<'static>> {
-    if cell_w == 0 || cell_h == 0 { return vec![]; }
-    let px_w = cell_w as u32;
-    let px_h = (cell_h as u32) * 2;
-    let resized = img.resize_exact(px_w, px_h, image::imageops::FilterType::Lanczos3);
-    let mut lines = Vec::with_capacity(cell_h as usize);
-    for row in (0..px_h).step_by(2) {
-        let mut spans = Vec::with_capacity(px_w as usize);
-        for col in 0..px_w {
-            let top = resized.get_pixel(col, row).to_rgba();
-            let bot = resized.get_pixel(col, (row + 1).min(px_h - 1)).to_rgba();
-            spans.push(Span::styled(
-                "▀",
-                Style::default()
-                    .fg(Color::Rgb(top[0], top[1], top[2]))
-                    .bg(Color::Rgb(bot[0], bot[1], bot[2])),
-            ));
-        }
-        lines.push(Line::from(spans));
-    }
-    lines
-}
 
 /// Largest (w, h) in cells that fits `img` into `max_w × max_h`
 /// while preserving aspect ratio. Each cell = ~1:2 pixel aspect.
