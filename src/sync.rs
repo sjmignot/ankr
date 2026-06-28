@@ -9,7 +9,7 @@ const SYNC_VER: u8 = 11;
 // Exact values captured via mitmproxy from real Anki 25.09.4 client.
 // Server validates the format; using our own identifiers may cause 400.
 const CLIENT_VER_HEADER: &str = "25.09.4,d52ca669,linux";
-const CLIENT_VER_BODY:   &str = "anki,25.09.4 (d52ca669),lin:nixos:26.05";
+const CLIENT_VER_BODY:   &str = "anki,25.09.4 (d52ca669),lin";
 
 // ── Zstd helpers ──────────────────────────────────────────────────────────────
 
@@ -110,7 +110,6 @@ impl SyncClient {
     where Req: Serialize, Resp: for<'de> Deserialize<'de>
     {
         let body_json = serde_json::to_vec(req)?;
-        eprintln!("  [dbg] /{endpoint} body: {}", String::from_utf8_lossy(&body_json));
         let header = SyncHeader { v: SYNC_VER, k: &self.hkey, c: CLIENT_VER_HEADER, s: &self.session };
         let resp = self.http.post(format!("{}sync/{endpoint}", self.endpoint))
             .header("Content-Type", "application/octet-stream")
