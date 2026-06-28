@@ -164,6 +164,20 @@ impl DeckSelectScreen {
             .highlight_symbol("» ");
 
         frame.render_stateful_widget(list, chunks[1], &mut self.list_state);
+
+        let footer = Line::from(vec![
+            Span::styled("[Enter]", Style::default().fg(Color::Yellow)),
+            Span::raw(" Review  "),
+            Span::styled("[a]", Style::default().fg(Color::Cyan)),
+            Span::raw(" AI  "),
+            Span::styled("[p]", Style::default().fg(Color::Cyan)),
+            Span::raw(" Poem  "),
+            Span::styled("[l/h]", Style::default().fg(Color::DarkGray)),
+            Span::raw(" Expand/Collapse  "),
+            Span::styled("[q]", Style::default().fg(Color::DarkGray)),
+            Span::raw(" Quit"),
+        ]);
+        frame.render_widget(Paragraph::new(footer), chunks[2]);
     }
 }
 
