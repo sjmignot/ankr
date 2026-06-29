@@ -42,3 +42,4 @@ zstd = "0.13"
 rpassword = "7"
 toml = "0.8"
 sha1 = { version = "0.10", features = ["oid"] }
+zip = "2"

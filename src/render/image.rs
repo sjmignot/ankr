@@ -9,6 +9,15 @@ use ratatui::{
     text::{Line, Span},
 };
 
+/// Load an image file from disk (handles JPEG/PNG/etc. and SVG).
+pub fn load_from_disk(path: &Path) -> Option<DynamicImage> {
+    if path.extension().and_then(|e| e.to_str()) == Some("svg") {
+        rasterize_svg(path)
+    } else {
+        image::open(path).ok()
+    }
+}
+
 fn rasterize_svg(path: &Path) -> Option<DynamicImage> {
     let data = std::fs::read(path).ok()?;
     let tree = resvg::usvg::Tree::from_data(&data, &resvg::usvg::Options::default()).ok()?;
@@ -45,7 +54,7 @@ pub fn extract_srcs(html: &str) -> Vec<String> {
 
 pub struct ImageCache {
     cache: LruCache<String, DynamicImage>,
-    media_dir: PathBuf,
+    pub media_dir: PathBuf,
 }
 
 impl ImageCache {
@@ -60,14 +69,15 @@ impl ImageCache {
         if !self.cache.contains(src) {
             let path = self.media_dir.join(src);
             if !path.exists() { return None; }
-            let img = if path.extension().and_then(|e| e.to_str()) == Some("svg") {
-                rasterize_svg(&path)?
-            } else {
-                image::open(&path).ok()?
-            };
+            let img = load_from_disk(&path)?;
             self.cache.put(src.to_string(), img);
         }
         self.cache.get(src).cloned()
+    }
+
+    /// Store a pre-loaded image (e.g. from background thread) into the LRU cache.
+    pub fn store(&mut self, src: &str, img: DynamicImage) {
+        self.cache.put(src.to_string(), img);
     }
 
     /// Returns pixel (width, height) without cloning the image data.

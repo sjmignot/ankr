@@ -1,3 +1,4 @@
+pub mod import;
 pub mod lock;
 pub mod queries;
 

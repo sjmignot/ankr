@@ -51,6 +51,12 @@ pub enum Commands {
         deck: String,
     },
 
+    /// Import notes from an .apkg file into the collection
+    Import {
+        /// Path to the .apkg file
+        file: PathBuf,
+    },
+
     /// Create Anki cards from a poem using the LPCG method
     Poem {
         /// Poem text file (reads from stdin if omitted)

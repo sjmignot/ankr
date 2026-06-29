@@ -83,16 +83,22 @@ pub fn get_or_create_deck_path(conn: &Connection, path: &str) -> Result<i64> {
     Ok(last_id)
 }
 
-/// Reviews already logged today for a deck (used to compute remaining daily allowance).
-pub fn get_today_review_count(conn: &Connection, deck_id: i64, crt: i64, today: i64) -> u32 {
+/// Comma-separated integer list for embedding in SQL IN clauses (safe: i64 only).
+fn ids_sql(ids: &[i64]) -> String {
+    if ids.is_empty() { return String::from("0"); }
+    ids.iter().map(|id| id.to_string()).collect::<Vec<_>>().join(",")
+}
+
+/// Reviews already logged today across a set of decks.
+fn today_review_count_multi(conn: &Connection, deck_ids: &[i64], crt: i64, today: i64) -> u32 {
     let today_start_ms = (crt + today * 86400) * 1000;
-    conn.query_row(
+    let id_list = ids_sql(deck_ids);
+    let sql = format!(
         "SELECT COUNT(*) FROM revlog r \
          JOIN cards c ON c.id = r.cid \
-         WHERE c.did=?1 AND r.id>=?2 AND r.type IN (1,2)",
-        params![deck_id, today_start_ms],
-        |r| r.get(0),
-    ).unwrap_or(0)
+         WHERE c.did IN ({id_list}) AND r.id>=?1 AND r.type IN (1,2)"
+    );
+    conn.query_row(&sql, params![today_start_ms], |r| r.get(0)).unwrap_or(0)
 }
 
 pub fn get_due_counts(conn: &Connection, deck_id: i64, today: i64, now: i64, crt: i64, review_limit: u32) -> Result<(u32, u32, u32)> {
@@ -105,7 +111,7 @@ pub fn get_due_counts(conn: &Connection, deck_id: i64, today: i64, now: i64, crt
     let total_due: u32 = conn.query_row(
         "SELECT COUNT(*) FROM cards WHERE did=?1 AND queue=2 AND due<=?2",
         params![deck_id, today], |r| r.get(0))?;
-    let done_today = get_today_review_count(conn, deck_id, crt, today);
+    let done_today = today_review_count_multi(conn, &[deck_id], crt, today);
     let review = total_due.min(review_limit.saturating_sub(done_today));
     Ok((new, learning, review))
 }
@@ -126,31 +132,40 @@ fn row_to_card(row: &rusqlite::Row<'_>) -> rusqlite::Result<Card> {
     })
 }
 
-pub fn get_due_cards(conn: &Connection, deck_id: i64, today: i64, crt: i64, review_limit: u32) -> Result<Vec<Card>> {
-    let done_today = get_today_review_count(conn, deck_id, crt, today);
+pub fn get_due_cards(conn: &Connection, deck_ids: &[i64], today: i64, crt: i64, review_limit: u32) -> Result<Vec<Card>> {
+    let done_today = today_review_count_multi(conn, deck_ids, crt, today);
     let remaining = review_limit.saturating_sub(done_today) as i64;
-    let mut stmt = conn.prepare(
+    let id_list = ids_sql(deck_ids);
+    let sql = format!(
         "SELECT id,nid,ord,type,ivl,factor,reps,lapses,data \
-         FROM cards WHERE did=?1 AND queue=2 AND due<=?2 ORDER BY due LIMIT ?3")?;
-    let cards: Vec<Card> = stmt.query_map(params![deck_id, today, remaining], row_to_card)?
+         FROM cards WHERE did IN ({id_list}) AND queue=2 AND due<=?1 ORDER BY due LIMIT ?2"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let cards: Vec<Card> = stmt.query_map(params![today, remaining], row_to_card)?
         .filter_map(|r| r.ok()).collect();
     Ok(cards)
 }
 
-pub fn get_learning_cards(conn: &Connection, deck_id: i64, now: i64) -> Result<Vec<Card>> {
-    let mut stmt = conn.prepare(
+pub fn get_learning_cards(conn: &Connection, deck_ids: &[i64], now: i64) -> Result<Vec<Card>> {
+    let id_list = ids_sql(deck_ids);
+    let sql = format!(
         "SELECT id,nid,ord,type,ivl,factor,reps,lapses,data \
-         FROM cards WHERE did=?1 AND queue=1 AND due<=?2 ORDER BY due")?;
-    let cards: Vec<Card> = stmt.query_map(params![deck_id, now], row_to_card)?
+         FROM cards WHERE did IN ({id_list}) AND queue=1 AND due<=?1 ORDER BY due"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let cards: Vec<Card> = stmt.query_map(params![now], row_to_card)?
         .filter_map(|r| r.ok()).collect();
     Ok(cards)
 }
 
-pub fn get_new_cards(conn: &Connection, deck_id: i64, limit: i64) -> Result<Vec<Card>> {
-    let mut stmt = conn.prepare(
+pub fn get_new_cards(conn: &Connection, deck_ids: &[i64], limit: i64) -> Result<Vec<Card>> {
+    let id_list = ids_sql(deck_ids);
+    let sql = format!(
         "SELECT id,nid,ord,type,ivl,factor,reps,lapses,data \
-         FROM cards WHERE did=?1 AND queue=0 ORDER BY due LIMIT ?2")?;
-    let cards: Vec<Card> = stmt.query_map(params![deck_id, limit], row_to_card)?
+         FROM cards WHERE did IN ({id_list}) AND queue=0 ORDER BY due LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let cards: Vec<Card> = stmt.query_map(params![limit], row_to_card)?
         .filter_map(|r| r.ok()).collect();
     Ok(cards)
 }

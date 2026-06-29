@@ -64,6 +64,17 @@ impl DeckSelectScreen {
             .and_then(|idx| self.decks.get(idx).map(|(d, ..)| d))
     }
 
+    /// All deck IDs to include in a review session for the selected entry.
+    /// For a parent deck, includes all descendants so studying goes across subdecks.
+    pub fn selected_deck_ids(&self) -> Vec<i64> {
+        let Some(name) = self.selected_name() else { return vec![]; };
+        let prefix = format!("{}::", name);
+        self.decks.iter()
+            .filter(|(d, ..)| d.name == name || d.name.starts_with(&prefix))
+            .map(|(d, ..)| d.id)
+            .collect()
+    }
+
     fn selected_name(&self) -> Option<String> {
         let vis = self.visible_indices();
         self.list_state.selected()

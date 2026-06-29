@@ -23,7 +23,6 @@ impl FsrsScheduler {
         let next = info.card;
 
         let _today = today_day(crt);
-        let due_days = (next.due - now).num_days().max(0);
         let due_ts = next.due.timestamp();
         let scheduled_days = next.scheduled_days.max(0);
 
@@ -32,6 +31,13 @@ impl FsrsScheduler {
             State::Learning => (CardType::Learning, Queue::Learning),
             State::Review => (CardType::Review, Queue::Review),
             State::Relearning => (CardType::Relearning, Queue::Learning),
+        };
+        // Review cards must always move at least one day forward; FSRS can
+        // schedule < 1-day intervals for "Hard" on short-interval cards.
+        let due_days = if new_type == CardType::Review {
+            (next.due - now).num_days().max(1)
+        } else {
+            (next.due - now).num_days().max(0)
         };
 
         let new_lapses = if rating == Rating::Again && card.card_type == CardType::Review {

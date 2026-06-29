@@ -120,6 +120,18 @@ async fn main() -> anyhow::Result<()> {
             }
         }
 
+        Some(Commands::Import { file }) => {
+            if cli.readonly {
+                anyhow::bail!("Cannot import in --readonly mode.");
+            }
+            if !file.exists() {
+                anyhow::bail!("File not found: {}", file.display());
+            }
+            eprintln!("Importing {}…", file.display());
+            let n = db::import::import_apkg(&db.conn, &file)?;
+            println!("Imported {n} new note(s). Run `ankr sync` to push to AnkiWeb.");
+        }
+
         Some(Commands::Ai { deck }) => {
             let decks = queries::get_decks(&db.conn)?;
             let matched = decks.iter().find(|d| {

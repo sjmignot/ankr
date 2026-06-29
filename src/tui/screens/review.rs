@@ -1,3 +1,4 @@
+use std::sync::mpsc;
 use std::time::Instant;
 use std::path::PathBuf;
 use ratatui::{
@@ -34,6 +35,7 @@ pub struct ReviewScreen {
     /// Pre-rendered halfblock lines cached for current card + area size.
     cached_art: Option<CachedArt>,
     answer_input: TextArea<'static>,
+    pending_img: Option<PendingImage>,
 }
 
 struct CachedArt {
@@ -41,6 +43,13 @@ struct CachedArt {
     cell_w: u16,
     cell_h: u16,
     lines: Vec<Line<'static>>,
+}
+
+struct PendingImage {
+    src: String,
+    cell_w: u16,
+    cell_h: u16,
+    rx: mpsc::Receiver<(image::DynamicImage, Vec<Line<'static>>)>,
 }
 
 impl ReviewScreen {
@@ -64,6 +73,7 @@ impl ReviewScreen {
             image_cache: img_render::ImageCache::new(media_dir),
             cached_art: None,
             answer_input,
+            pending_img: None,
         }
     }
 
@@ -374,18 +384,14 @@ impl ReviewScreen {
                     let mut lines: Vec<Line<'static>> = Vec::new();
                     // Typed answer comparison against the rendered answer text.
                     if !typed.is_empty() {
-                        let (answer_text, _) = html::extract(&self.answer_html());
-                        // Strip FrontSide content from comparison — use first non-empty line
-                        // of answer that differs from the question.
+                        let answer_html = self.answer_html();
                         let (question_text, _) = html::extract(&self.question_html());
-                        let correct = answer_text
-                            .lines()
-                            .find(|l| {
-                                let l = l.trim();
-                                !l.is_empty() && !question_text.contains(l)
-                            })
-                            .unwrap_or(answer_text.lines().next().unwrap_or(""))
-                            .to_string();
+                        let correct = if let Some(t) = self.active_template() {
+                            standard_correct(&self.note, &t.qfmt, &answer_html, &question_text)
+                        } else {
+                            let (answer_text, _) = html::extract(&answer_html);
+                            answer_text.lines().next().unwrap_or("").to_string()
+                        };
                         lines.extend(comparison_lines(typed, &correct));
                         lines.push(Line::from(Span::styled(
                             "— — —",
@@ -416,33 +422,85 @@ impl ReviewScreen {
         let Some(src) = srcs.first() else { return };
         let (cell_w, cell_h) = (area.width, area.height);
 
-        // Regenerate if src changed or area resized.
-        let stale = self.cached_art.as_ref().map_or(true, |c| {
-            c.src != *src || c.cell_w != cell_w || c.cell_h != cell_h
-        });
+        // Fast path: cached art is current.
+        let cached_ok = self.cached_art.as_ref()
+            .map_or(false, |c| c.src == *src && c.cell_w == cell_w && c.cell_h == cell_h);
+        if cached_ok {
+            let lines = self.cached_art.as_ref().unwrap().lines.clone();
+            frame.render_widget(Paragraph::new(lines), area);
+            return;
+        }
 
-        if stale {
-            if let Some(img) = self.image_cache.get(src) {
-                let (w, h) = img_render::fit_dimensions(&img, cell_w, cell_h);
-                let lines = img_render::to_quadrant_blocks(&img, w, h);
-                self.cached_art = Some(CachedArt {
-                    src: src.clone(),
-                    cell_w,
-                    cell_h,
-                    lines,
-                });
+        // Check whether the background thread has finished.
+        let ready = if let Some(p) = &self.pending_img {
+            p.src == *src && p.cell_w == cell_w && p.cell_h == cell_h
+        } else {
+            false
+        };
+
+        if ready {
+            match self.pending_img.as_ref().unwrap().rx.try_recv() {
+                Ok((raw_img, lines)) => {
+                    self.image_cache.store(src, raw_img);
+                    self.cached_art = Some(CachedArt { src: src.clone(), cell_w, cell_h, lines });
+                    self.pending_img = None;
+                    let lines = self.cached_art.as_ref().unwrap().lines.clone();
+                    frame.render_widget(Paragraph::new(lines), area);
+                    return;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    // Still loading — fall through to placeholder.
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Thread failed (file not found, decode error).
+                    self.pending_img = None;
+                    frame.render_widget(
+                        Paragraph::new(format!("[image: {src}]"))
+                            .style(Style::default().fg(Color::DarkGray)),
+                        area,
+                    );
+                    return;
+                }
             }
         }
 
-        if let Some(art) = &self.cached_art {
-            let para = Paragraph::new(art.lines.clone());
-            frame.render_widget(para, area);
-        } else {
-            // Image not found — show the filename so user knows what's missing.
-            let para = Paragraph::new(format!("[image: {src}]"))
-                .style(Style::default().fg(Color::DarkGray));
-            frame.render_widget(para, area);
+        // Nothing ready yet — if no thread is running, start one.
+        let needs_spawn = self.pending_img.as_ref()
+            .map_or(true, |p| p.src != *src || p.cell_w != cell_w || p.cell_h != cell_h);
+
+        if needs_spawn {
+            // Check LRU cache first; if already decoded, only quadrant conversion needed.
+            if let Some(img) = self.image_cache.get(src) {
+                // Raw image is cached: just re-convert for new dimensions.
+                let (w, h) = img_render::fit_dimensions(&img, cell_w, cell_h);
+                let lines = img_render::to_quadrant_blocks(&img, w, h);
+                self.cached_art = Some(CachedArt { src: src.clone(), cell_w, cell_h, lines });
+                let lines = self.cached_art.as_ref().unwrap().lines.clone();
+                frame.render_widget(Paragraph::new(lines), area);
+                return;
+            }
+
+            // Not cached — load from disk in a background thread.
+            let (tx, rx) = mpsc::channel();
+            let src_clone = src.clone();
+            let media_dir = self.image_cache.media_dir.clone();
+            std::thread::spawn(move || {
+                let path = media_dir.join(&src_clone);
+                if let Some(img) = img_render::load_from_disk(&path) {
+                    let (w, h) = img_render::fit_dimensions(&img, cell_w, cell_h);
+                    let lines = img_render::to_quadrant_blocks(&img, w, h);
+                    let _ = tx.send((img, lines));
+                }
+            });
+            self.pending_img = Some(PendingImage { src: src.clone(), cell_w, cell_h, rx });
         }
+
+        // Show placeholder while loading.
+        frame.render_widget(
+            Paragraph::new("  loading image…")
+                .style(Style::default().fg(Color::DarkGray)),
+            area,
+        );
     }
 
     fn render_footer(&self, frame: &mut Frame, area: Rect) {
@@ -478,6 +536,62 @@ impl ReviewScreen {
             .block(Block::default().borders(Borders::TOP));
         frame.render_widget(para, area);
     }
+}
+
+/// Determine the correct answer for a standard card's typed-answer comparison.
+///
+/// Priority:
+///   1. `{{type:FieldName}}` in qfmt → that field's value (Anki native type-answer mode)
+///   2. First field whose name does NOT appear as `{{FieldName}}` in qfmt
+///      (the question shows certain fields; the answer is a field not shown)
+///   3. Heuristic: first line of rendered answer that differs from the question
+fn standard_correct(note: &ResolvedNote, qfmt: &str, answer_html: &str, question_text: &str) -> String {
+    use once_cell::sync::Lazy;
+    use regex::Regex;
+    use std::collections::HashSet;
+
+    // Priority 1: explicit {{type:FieldName}}
+    static TYPE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\{\{type:(.+?)\}\}").unwrap());
+    if let Some(cap) = TYPE_RE.captures(qfmt) {
+        let fname = cap[1].trim();
+        if let Some((_, val)) = note.fields.iter().find(|(n, _)| n == fname) {
+            let (plain, _) = html::extract(val);
+            if !plain.trim().is_empty() {
+                return plain;
+            }
+        }
+    }
+
+    // Priority 2: first field not referenced (by plain {{Name}}) in qfmt.
+    // We look for {{Name}} patterns that don't have a prefix like "type:" or "#".
+    static REF_RE: Lazy<Regex> = Lazy::new(|| {
+        // Matches {{Name}} where Name contains no colon (excludes type:, hint:, etc.)
+        Regex::new(r"\{\{([^}:]+)\}\}").unwrap()
+    });
+    let shown: HashSet<String> = REF_RE.captures_iter(qfmt)
+        .map(|c| c[1].trim().to_string())
+        .filter(|s| !s.starts_with('#') && !s.starts_with('^') && !s.starts_with('/'))
+        .collect();
+    if !shown.is_empty() {
+        for (name, val) in &note.fields {
+            if !shown.contains(name.as_str()) {
+                let (plain, _) = html::extract(val);
+                if !plain.trim().is_empty() {
+                    return plain;
+                }
+            }
+        }
+    }
+
+    // Priority 3: heuristic — first non-empty answer line not in question
+    let (answer_text, _) = html::extract(answer_html);
+    answer_text.lines()
+        .find(|l| {
+            let l = l.trim();
+            !l.is_empty() && !question_text.contains(l)
+        })
+        .unwrap_or(answer_text.lines().next().unwrap_or(""))
+        .to_string()
 }
 
 fn extract_cloze_answer(text: &str, active_ord: u32) -> String {

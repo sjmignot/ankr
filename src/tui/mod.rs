@@ -224,12 +224,13 @@ async fn run_app(
                         if let Some(deck) = s.selected_deck() {
                             let deck_id = deck.id;
                             let deck_name = deck.name.clone();
+                            let deck_ids = s.selected_deck_ids();
                             let today = queries::today_day(crt);
                             let now = queries::now_unix();
 
-                            let learning = queries::get_learning_cards(&db.conn, deck_id, now)?;
-                            let due = queries::get_due_cards(&db.conn, deck_id, today, crt, config.review_limit)?;
-                            let new = queries::get_new_cards(&db.conn, deck_id, config.new_limit as i64)?;
+                            let learning = queries::get_learning_cards(&db.conn, &deck_ids, now)?;
+                            let due = queries::get_due_cards(&db.conn, &deck_ids, today, crt, config.review_limit)?;
+                            let new = queries::get_new_cards(&db.conn, &deck_ids, config.new_limit as i64)?;
 
                             let notetypes = queries::get_all_notetypes(&db.conn)?;
                             let notetype_id = notetypes.first().map(|(id, _)| *id).unwrap_or(0);
