@@ -1,6 +1,6 @@
 [package]
 name = "ankr"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Terminal Anki client — review cards, sync with AnkiWeb, and create cards from the command line"
 license = "MIT"
