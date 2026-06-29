@@ -36,6 +36,7 @@ pub struct ReviewScreen {
     cached_art: Option<CachedArt>,
     answer_input: TextArea<'static>,
     pending_img: Option<PendingImage>,
+    scroll_offset: u16,
 }
 
 struct CachedArt {
@@ -74,6 +75,7 @@ impl ReviewScreen {
             cached_art: None,
             answer_input,
             pending_img: None,
+            scroll_offset: 0,
         }
     }
 
@@ -94,6 +96,7 @@ impl ReviewScreen {
                 KeyCode::Enter => {
                     let typed = self.answer_input.lines().join(" ").trim().to_string();
                     self.side = Side::Answer(typed);
+                    self.scroll_offset = 0;
                     ReviewAction::None
                 }
                 KeyCode::Esc => ReviewAction::Back,
@@ -108,8 +111,17 @@ impl ReviewScreen {
                 KeyCode::Char('3') => self.rated(Rating::Good),
                 KeyCode::Char('4') => self.rated(Rating::Easy),
                 KeyCode::Char('q') => ReviewAction::Quit,
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.scroll_offset = self.scroll_offset.saturating_sub(3);
+                    ReviewAction::None
+                }
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.scroll_offset = self.scroll_offset.saturating_add(3);
+                    ReviewAction::None
+                }
                 KeyCode::Esc => {
                     self.side = Side::Question;
+                    self.scroll_offset = 0;
                     ReviewAction::None
                 }
                 _ => ReviewAction::None,
@@ -380,7 +392,8 @@ impl ReviewScreen {
         }
         let para = Paragraph::new(text)
             .block(Block::default().borders(Borders::ALL))
-            .wrap(Wrap { trim: false });
+            .wrap(Wrap { trim: false })
+            .scroll((self.scroll_offset, 0));
         frame.render_widget(para, area);
     }
 
@@ -586,7 +599,9 @@ impl ReviewScreen {
                 Span::styled("[4]", Style::default().fg(Color::Cyan)),
                 Span::raw(" Easy  "),
                 Span::styled("[Esc]", Style::default().fg(Color::DarkGray)),
-                Span::raw(" Re-read"),
+                Span::raw(" Re-read  "),
+                Span::styled("[↑↓]", Style::default().fg(Color::DarkGray)),
+                Span::raw(" Scroll"),
             ]),
         };
         let para = Paragraph::new(text)

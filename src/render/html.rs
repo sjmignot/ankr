@@ -11,10 +11,7 @@ pub fn strip(html: &str) -> String {
         re.replace_all(html, |caps: &regex::Captures| {
             let url = caps[1].trim();
             let text = caps[2].trim();
-            let url_display = url
-                .trim_start_matches("https://")
-                .trim_start_matches("http://");
-            if url_display.is_empty() { text.to_string() } else { format!("{text} ({url_display})") }
+            if url.is_empty() { text.to_string() } else { format!("{text} ({url})") }
         }).to_string()
     };
     // Strip any remaining <a> tags (named anchors without href).
