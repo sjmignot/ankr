@@ -248,12 +248,9 @@ impl ReviewScreen {
                 .map_or(false, |(w, h)| h > w);
 
             if portrait {
-                // Portrait: image on the right, controls on the left.
-                let cols = Layout::default()
-                    .direction(Direction::Horizontal)
-                    .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
-                    .split(area);
-                let left = Layout::default()
+                // Portrait: full-width header + footer, image left, text right.
+                // Footer spans the full width so the image never overlaps the rating keys.
+                let outer = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(2),
@@ -261,21 +258,55 @@ impl ReviewScreen {
                         Constraint::Length(answer_h),
                         Constraint::Length(2),
                     ])
+                    .split(area);
+                self.render_header(frame, outer[0]);
+                if is_question { frame.render_widget(&self.answer_input, outer[2]); }
+                self.render_footer(frame, outer[3]);
+
+                let cols = Layout::default()
+                    .direction(Direction::Horizontal)
+                    .constraints([Constraint::Percentage(38), Constraint::Percentage(62)])
+                    .split(outer[1]);
+
+                let content_c = if is_question {
+                    Constraint::Fill(1)
+                } else {
+                    let col_inner_w = ((area.width as u32 * 38 / 100) as u16).saturating_sub(2);
+                    let visual_lines: u16 = if col_inner_w == 0 {
+                        self.card_text().len() as u16
+                    } else {
+                        self.card_text().iter().map(|l| {
+                            let chars: usize = l.spans.iter().map(|s| s.content.chars().count()).sum();
+                            if chars == 0 { 1u16 } else { ((chars as u16 + col_inner_w - 1) / col_inner_w).max(1) }
+                        }).sum()
+                    };
+                    Constraint::Length((visual_lines + 2).min(outer[1].height))
+                };
+                let text_col = Layout::default()
+                    .direction(Direction::Vertical)
+                    .constraints([content_c])
                     .split(cols[0]);
-                self.render_header(frame, left[0]);
-                self.render_content(frame, left[1]);
-                if is_question { frame.render_widget(&self.answer_input, left[2]); }
-                self.render_footer(frame, left[3]);
+                self.render_content(frame, text_col[0]);
                 self.render_image(frame, cols[1], &srcs);
             } else {
-                // Landscape: image at the bottom, fills remaining height.
+                // Landscape: image at the bottom.
+                // Question side: image dominates. Answer side: give content just
+                // enough rows for its lines (+2 borders), capped at half the area,
+                // so there's no wasted empty block and image fills the rest.
+                let (content_c, image_c) = if is_question {
+                    (Constraint::Max(6), Constraint::Fill(1))
+                } else {
+                    let line_count = self.card_text().len() as u16;
+                    let h = (line_count + 2).min(area.height / 2);
+                    (Constraint::Length(h), Constraint::Fill(1))
+                };
                 let rows = Layout::default()
                     .direction(Direction::Vertical)
                     .constraints([
                         Constraint::Length(2),
-                        Constraint::Max(6),
+                        content_c,
                         Constraint::Length(answer_h),
-                        Constraint::Fill(1),
+                        image_c,
                         Constraint::Length(2),
                     ])
                     .split(area);
@@ -398,17 +429,40 @@ impl ReviewScreen {
                             Style::default().fg(Color::DarkGray),
                         )));
                     }
-                    for (name, val) in &self.note.fields {
-                        let (plain, _) = html::extract(val);
-                        if !plain.is_empty() {
-                            lines.push(Line::from(Span::styled(
-                                format!("{name}:"),
-                                Style::default()
-                                    .fg(Color::Cyan)
-                                    .add_modifier(Modifier::BOLD),
-                            )));
-                            for l in plain.lines() {
+                    // Use the rendered answer HTML, split at Anki's standard
+                    // <hr id=answer> separator so we only show the "back" portion.
+                    // If no separator exists, strip {{FrontSide}} from the template.
+                    let answer_html = self.answer_html();
+                    let back_html: &str = ["<hr id=answer>", "<hr id=\"answer\">", "<hr id='answer'>"]
+                        .iter()
+                        .find_map(|sep| {
+                            answer_html.find(sep).map(|i| &answer_html[i + sep.len()..])
+                        })
+                        .unwrap_or_else(|| {
+                            // No separator — return the slice starting from end so we fall through.
+                            &answer_html[answer_html.len()..]
+                        });
+                    if !back_html.trim().is_empty() {
+                        let (plain, _) = html::extract(back_html);
+                        for l in plain.lines() {
+                            if !l.trim().is_empty() {
                                 lines.push(Line::from(l.to_string()));
+                            }
+                        }
+                    } else {
+                        // No <hr id=answer> — fall back to all non-empty raw fields.
+                        for (name, val) in &self.note.fields {
+                            let (plain, _) = html::extract(val);
+                            if !plain.is_empty() {
+                                lines.push(Line::from(Span::styled(
+                                    format!("{name}:"),
+                                    Style::default()
+                                        .fg(Color::Cyan)
+                                        .add_modifier(Modifier::BOLD),
+                                )));
+                                for l in plain.lines() {
+                                    lines.push(Line::from(l.to_string()));
+                                }
                             }
                         }
                     }

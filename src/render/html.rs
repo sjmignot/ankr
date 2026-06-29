@@ -4,7 +4,25 @@ pub fn strip(html: &str) -> String {
         // Plain text — preserve newlines as-is.
         return html.trim().to_string();
     }
-    html2text::from_read(html.as_bytes(), 10000)
+    // Replace <a href="url">text</a> → "text (domain)" — shows where the
+    // link goes without a long URL that wraps badly in narrow columns.
+    let with_domains = {
+        let re = regex::Regex::new(r#"(?si)<a\b[^>]*\bhref\s*=\s*"([^"]*)"[^>]*>(.*?)</a>"#).unwrap();
+        re.replace_all(html, |caps: &regex::Captures| {
+            let url = caps[1].trim();
+            let text = caps[2].trim();
+            let url_display = url
+                .trim_start_matches("https://")
+                .trim_start_matches("http://");
+            if url_display.is_empty() { text.to_string() } else { format!("{text} ({url_display})") }
+        }).to_string()
+    };
+    // Strip any remaining <a> tags (named anchors without href).
+    let no_anchors = regex::Regex::new(r#"(?si)<a\b[^>]*>(.*?)</a>"#)
+        .unwrap()
+        .replace_all(&with_domains, "$1")
+        .to_string();
+    html2text::from_read(no_anchors.as_bytes(), 10000)
         .unwrap_or_else(|_| html.to_string())
         .lines()
         .map(|l| l.trim_end())
