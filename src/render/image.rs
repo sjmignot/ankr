@@ -107,7 +107,8 @@ pub fn to_quadrant_blocks(img: &DynamicImage, cell_w: u16, cell_h: u16) -> Vec<L
     // by fit_dimensions (cell_h accounts for 2:1 terminal char height).
     let px_w = (cell_w as u32) * 2;
     let px_h = (cell_h as u32) * 2;
-    let resized = img.resize_exact(px_w, px_h, image::imageops::FilterType::Lanczos3);
+    // Triangle (bilinear) is fast enough at quadrant-block resolution.
+    let resized = img.resize_exact(px_w, px_h, image::imageops::FilterType::Triangle);
 
     let mut lines = Vec::with_capacity(cell_h as usize);
     for row in (0..px_h).step_by(2) {

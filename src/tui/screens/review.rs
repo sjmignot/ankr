@@ -423,8 +423,11 @@ impl ReviewScreen {
         let (cell_w, cell_h) = (area.width, area.height);
 
         // Fast path: cached art is current.
-        let cached_ok = self.cached_art.as_ref()
-            .map_or(false, |c| c.src == *src && c.cell_w == cell_w && c.cell_h == cell_h);
+        // Height tolerance of 10 rows prevents forced re-renders caused by the answer
+        // input box appearing/disappearing between question and answer sides.
+        let cached_ok = self.cached_art.as_ref().map_or(false, |c| {
+            c.src == *src && c.cell_w == cell_w && c.cell_h.abs_diff(cell_h) <= 10
+        });
         if cached_ok {
             let lines = self.cached_art.as_ref().unwrap().lines.clone();
             frame.render_widget(Paragraph::new(lines), area);
