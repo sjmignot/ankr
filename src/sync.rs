@@ -201,12 +201,12 @@ impl SyncClient {
 
         // ── Start ─────────────────────────────────────────────────────────
         eprintln!("  start…");
-        // v11 protocol: graves are included inline in the start body (null = no local graves).
+        // v11 protocol: graves field is the client's local deletions (empty object, not null).
         #[derive(Serialize)]
         struct StartReq {
             #[serde(rename = "minUsn")] min_usn: i64,
             #[serde(rename = "lnewer")] l_newer: bool,
-            graves: Option<()>,
+            graves: Graves,
         }
         #[derive(Deserialize, Default)]
         struct StartResp {
@@ -214,7 +214,11 @@ impl SyncClient {
             #[serde(default)] graves: Graves,
         }
         let l_newer = local_mod >= meta.server_mod;
-        let start: StartResp = self.post("start", &StartReq { min_usn: local_usn, l_newer, graves: None }).await?;
+        let start: StartResp = self.post("start", &StartReq {
+            min_usn: local_usn,
+            l_newer,
+            graves: Graves::default(),
+        }).await?;
 
         if start.full_sync {
             bail!(
@@ -224,13 +228,13 @@ impl SyncClient {
         }
 
         // ── applyGraves ───────────────────────────────────────────────────
-        // Protocol: client applies server's graves locally, then echoes them back
-        // to the server wrapped in "chunk" (not "graves") as confirmation.
+        // Apply server's graves to our local DB, then tell the server our own
+        // graves (empty — ankr never deletes cards).
         eprintln!("  applyGraves…");
         apply_server_graves(conn, &start.graves)?;
         #[derive(Serialize)]
         struct ApplyGravesReq { chunk: Graves }
-        let _: Value = self.post("applyGraves", &ApplyGravesReq { chunk: start.graves }).await?;
+        let _: Value = self.post("applyGraves", &ApplyGravesReq { chunk: Graves::default() }).await?;
 
         // ── applyChanges ──────────────────────────────────────────────────
         eprintln!("  applyChanges…");
